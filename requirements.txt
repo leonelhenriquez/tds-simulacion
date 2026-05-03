@@ -1,0 +1,4 @@
+packaging==26.2
+pygame-ce==2.5.7
+setuptools==82.0.1
+wheel==0.47.0
