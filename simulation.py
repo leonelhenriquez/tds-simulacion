@@ -13,7 +13,8 @@ defaultYellow = 5
 signals = []
 noOfSignals = 4
 currentGreen = 0   # Indicates which signal is green currently
-nextGreen = (currentGreen+1)%noOfSignals    # Indicates which signal will turn green next
+# We'll treat currentGreen as the current PHASE (0 or 1). Each phase has two opposite signals.
+nextGreen = (currentGreen+1)%2    # Indicates which phase will turn green next
 currentYellow = 0   # Indicates whether yellow signal is on or off 
 
 speeds = {'car':2.25, 'bus':1.8, 'truck':1.8, 'motorcycle':2.5}  # average speeds of vehicles
@@ -25,6 +26,8 @@ y = {'right':[348,370,398], 'down':[0,0,0], 'left':[498,466,436], 'up':[800,800,
 vehicles = {'right': {0:[], 1:[], 2:[], 'crossed':0}, 'down': {0:[], 1:[], 2:[], 'crossed':0}, 'left': {0:[], 1:[], 2:[], 'crossed':0}, 'up': {0:[], 1:[], 2:[], 'crossed':0}}
 vehicleTypes = {0:'car', 1:'bus', 2:'truck', 3:'motorcycle'}
 directionNumbers = {0:'right', 1:'down', 2:'left', 3:'up'}
+# Phases: 0 => right(0) + left(2); 1 => down(1) + up(3)
+phase_map = {0: [0, 2], 1: [1, 3]}
 
 # Coordinates of signal image, timer, and vehicle count
 signalCoods = [(550,230),(830,230),(830,570),(550,570)]
@@ -57,7 +60,7 @@ class Vehicle(pygame.sprite.Sprite):
         pygame.sprite.Sprite.__init__(self)
         self.lane = lane
         self.vehicleClass = vehicleClass
-        self.maxSpeed = speeds[vehicleClass] * random.uniform(0.5,3)   # randomize speed of vehicle by multiplying with a random number between 0.75 and 1.25
+        self.maxSpeed = speeds[vehicleClass] * random.uniform(0.5,2)   # randomize speed of vehicle by multiplying with a random number between 0.75 and 1.25
         self.speed = self.maxSpeed
         self.direction_number = direction_number
         self.direction = direction
@@ -195,7 +198,8 @@ class Vehicle(pygame.sprite.Sprite):
     def move(self):
         self._update_crossed()
 
-        signal_is_green = (currentGreen==self.direction_number and currentYellow==0)
+        # A direction has green if its index belongs to the current phase
+        signal_is_green = (self.direction_number in phase_map[currentGreen] and currentYellow==0)
         must_stop_for_signal = (self.crossed==0 and signal_is_green==False)
 
         distance_to_stop = self._distance_to_stop() if must_stop_for_signal else float('inf')
@@ -234,39 +238,51 @@ def initialize():
 
 def repeat():
     global currentGreen, currentYellow, nextGreen
-    while(signals[currentGreen].green>0):   # while the timer of current green signal is not zero
+    # While the green time for the current phase (use first signal of phase) is > 0
+    green_idx = phase_map[currentGreen][0]
+    while(signals[green_idx].green>0):
         updateValues()
         time.sleep(1)
     currentYellow = 1   # set yellow signal on
-    # reset stop coordinates of lanes and vehicles 
-    for i in range(0,3):
-        for vehicle in vehicles[directionNumbers[currentGreen]][i]:
-            vehicle.stop = defaultStop[directionNumbers[currentGreen]]
-    while(signals[currentGreen].yellow>0):  # while the timer of current yellow signal is not zero
+    # reset stop coordinates of lanes and vehicles for all directions in current phase
+    for dir_idx in phase_map[currentGreen]:
+        dir_name = directionNumbers[dir_idx]
+        for i in range(0,3):
+            for vehicle in vehicles[dir_name][i]:
+                vehicle.stop = defaultStop[dir_name]
+    # While yellow time for current phase > 0
+    yellow_idx = phase_map[currentGreen][0]
+    while(signals[yellow_idx].yellow>0):
         updateValues()
         time.sleep(1)
     currentYellow = 0   # set yellow signal off
-    
-     # reset all signal times of current signal to default times
-    signals[currentGreen].green = defaultGreen[currentGreen]
-    signals[currentGreen].yellow = defaultYellow
-    signals[currentGreen].red = defaultRed
-       
-    currentGreen = nextGreen # set next signal as green signal
-    nextGreen = (currentGreen+1)%noOfSignals    # set next green signal
-    signals[nextGreen].red = signals[currentGreen].yellow+signals[currentGreen].green    # set the red time of next to next signal as (yellow time + green time) of next signal
-    repeat()  
+
+    # reset all signal times of current phase to default times (both signals in phase)
+    for dir_idx in phase_map[currentGreen]:
+        signals[dir_idx].green = defaultGreen[dir_idx]
+        signals[dir_idx].yellow = defaultYellow
+        signals[dir_idx].red = defaultRed
+
+    # advance phase
+    currentGreen = nextGreen # set next phase as green phase
+    nextGreen = (currentGreen+1)%2    # set next phase
+    # set red time for signals in next phase as sum of current green+yellow
+    red_time = signals[phase_map[currentGreen][0]].yellow + signals[phase_map[currentGreen][0]].green
+    for dir_idx in phase_map[nextGreen]:
+        signals[dir_idx].red = red_time
+    repeat()
 
 # Update values of the signal timers after every second
 def updateValues():
     for i in range(0, noOfSignals):
-        if(i==currentGreen):
-            if(currentYellow==0):
-                signals[i].green-=1
+        # If signal i is part of the current active phase, decrement its green/yellow
+        if i in phase_map[currentGreen]:
+            if currentYellow==0:
+                signals[i].green -= 1
             else:
-                signals[i].yellow-=1
+                signals[i].yellow -= 1
         else:
-            signals[i].red-=1
+            signals[i].red -= 1
 
 # Generating vehicles in the simulation
 def generateVehicles():
@@ -324,16 +340,17 @@ class Main:
                 sys.exit()
 
         screen.blit(background,(0,0))   # display background in simulation
-        for i in range(0,noOfSignals):  # display signal and set timer according to current status: green, yello, or red
-            if(i==currentGreen):
-                if(currentYellow==1):
+        for i in range(0,noOfSignals):  # display signal and set timer according to current status: green, yellow, or red
+            # If this direction belongs to the active phase, show green/yellow
+            if i in phase_map[currentGreen]:
+                if currentYellow==1:
                     signals[i].signalText = signals[i].yellow
                     screen.blit(yellowSignal, signalCoods[i])
                 else:
                     signals[i].signalText = signals[i].green
                     screen.blit(greenSignal, signalCoods[i])
             else:
-                if(signals[i].red<=10):
+                if signals[i].red<=10:
                     signals[i].signalText = signals[i].red
                 else:
                     signals[i].signalText = "---"
