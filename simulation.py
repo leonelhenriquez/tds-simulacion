@@ -5,21 +5,22 @@ import pygame
 import sys
 import os
 
-# Default values of signal timers
+# Valores por defecto de los temporizadores de los semáforos
 defaultGreen = {0:10, 1:10, 2:10, 3:10}
 defaultRed = 150
 defaultYellow = 5
 
 signals = []
 noOfSignals = 4
-currentGreen = 0   # Indicates which signal is green currently
-# We'll treat currentGreen as the current PHASE (0 or 1). Each phase has two opposite signals.
-nextGreen = (currentGreen+1)%2    # Indicates which phase will turn green next
-currentYellow = 0   # Indicates whether yellow signal is on or off 
+currentGreen = 0   # Indica qué semáforo está en verde actualmente
+# Trataremos `currentGreen` como la FASE actual (0 o 1). Cada fase tiene dos semáforos opuestos.
+nextGreen = (currentGreen+1)%2    # Indica qué fase será la siguiente en ponerse en verde
+currentYellow = 0   # Indica si el amarillo está activado o no
 
-speeds = {'car':2.25, 'bus':1.8, 'truck':1.8, 'motorcycle':2.5}  # average speeds of vehicles
+# Velocidades promedio por tipo de vehículo
+speeds = {'car':2.25, 'bus':1.8, 'truck':1.8, 'motorcycle':2.5}
 
-# Coordinates of vehicles' start
+# Coordenadas de inicio de los vehículos
 x = {'right':[20,20,20], 'down':[775,747,717], 'left':[1420,1420,1420], 'up':[622,647,677]}    
 y = {'right':[348,370,398], 'down':[0,0,0], 'left':[498,466,436], 'up':[800,800,800]}
 
@@ -29,18 +30,18 @@ directionNumbers = {0:'right', 1:'down', 2:'left', 3:'up'}
 # Phases: 0 => right(0) + left(2); 1 => down(1) + up(3)
 phase_map = {0: [0, 2], 1: [1, 3]}
 
-# Coordinates of signal image, timer, and vehicle count
+# Coordenadas de la imagen del semáforo, temporizador y conteo de vehículos
 signalCoods = [(550,230),(830,230),(830,570),(550,570)]
 signalTimerCoods = [(550,210),(830,210),(830,550),(550,550)]
 
-# Coordinates of stop lines
+# Coordenadas de las líneas de parada
 stopLines = {'right': 610, 'down': 330, 'left': 820, 'up': 535}
 defaultStop = {'right': 600, 'down': 320, 'left': 830, 'up': 545}
 # stops = {'right': [580,580,580], 'down': [320,320,320], 'left': [810,810,810], 'up': [545,545,545]}
 
-# Gap between vehicles
-stoppingGap = 15    # stopping gap
-movingGap = 15   # moving gap
+# Separación entre vehículos
+stoppingGap = 15    # distancia al detenerse
+movingGap = 15   # distancia al moverse
 decelerationDistance = 120
 accelerationRate = 0.12
 decelerationRate = 0.2
@@ -60,7 +61,7 @@ class Vehicle(pygame.sprite.Sprite):
         pygame.sprite.Sprite.__init__(self)
         self.lane = lane
         self.vehicleClass = vehicleClass
-        self.maxSpeed = speeds[vehicleClass] * random.uniform(0.5,2)   # randomize speed of vehicle by multiplying with a random number between 0.75 and 1.25
+        self.maxSpeed = speeds[vehicleClass] * random.uniform(0.5,2)   # aleatoriza la velocidad multiplicando por un factor aleatorio
         self.speed = self.maxSpeed
         self.direction_number = direction_number
         self.direction = direction
@@ -69,12 +70,12 @@ class Vehicle(pygame.sprite.Sprite):
         self.crossed = 0
         vehicles[direction][lane].append(self)
         self.index = len(vehicles[direction][lane]) - 1
-        # Load texture (moved to helper method)
+        # Cargar textura (método auxiliar)
         self._load_texture()
 
-        if(len(vehicles[direction][lane])>1 and vehicles[direction][lane][self.index-1].crossed==0):    # if more than 1 vehicle in the lane of vehicle before it has crossed stop line
+        if(len(vehicles[direction][lane])>1 and vehicles[direction][lane][self.index-1].crossed==0):    # si hay más de 1 vehículo en el carril y el anterior no ha cruzado
             if(direction=='right'):
-                self.stop = vehicles[direction][lane][self.index-1].stop - vehicles[direction][lane][self.index-1].image.get_rect().width - stoppingGap         # setting stop coordinate as: stop coordinate of next vehicle - width of next vehicle - gap
+                self.stop = vehicles[direction][lane][self.index-1].stop - vehicles[direction][lane][self.index-1].image.get_rect().width - stoppingGap         # coordenada de parada: parada del siguiente - ancho - separación
             elif(direction=='left'):
                 self.stop = vehicles[direction][lane][self.index-1].stop + vehicles[direction][lane][self.index-1].image.get_rect().width + stoppingGap
             elif(direction=='down'):
@@ -84,7 +85,7 @@ class Vehicle(pygame.sprite.Sprite):
         else:
             self.stop = defaultStop[direction]
             
-        # Set new starting and stopping coordinate
+        # Ajustar coordenadas iniciales y de parada según tamaño de la imagen
         if(direction=='right'):
             temp = self.image.get_rect().width + stoppingGap    
             x[direction][lane] -= temp
@@ -103,7 +104,7 @@ class Vehicle(pygame.sprite.Sprite):
         screen.blit(self.image, (self.x, self.y))
 
     def _load_texture(self):
-        # Choose a random image from images/vehicle/<vehicleClass>/ if available
+        # Elegir una imagen aleatoria desde images/vehicle/<vehicleClass>/ si existe
         dir_path = os.path.join("images", "vehicle", self.vehicleClass)
         try:
             files = [f for f in os.listdir(dir_path) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif'))]
@@ -115,7 +116,7 @@ class Vehicle(pygame.sprite.Sprite):
         except Exception:
             path = os.path.join("images", "vehicle", "others", self.vehicleClass + ".png")
         self.image = pygame.image.load(path).convert_alpha()
-        # Scale before rotating for specific vehicle types
+        # Escalar antes de rotar para tipos específicos
         orig_w = self.image.get_rect().width
         orig_h = self.image.get_rect().height
         if self.vehicleClass == 'car':
@@ -128,7 +129,7 @@ class Vehicle(pygame.sprite.Sprite):
             scale_factor = target_w / orig_w
             new_h = max(1, int(orig_h * scale_factor))
             self.image = pygame.transform.scale(self.image, (target_w, new_h))
-        # Rotate according to direction
+        # Rotar según la dirección
         if self.direction == 'right':
             self.image = pygame.transform.rotate(self.image, -90)
         elif self.direction == 'down':
@@ -198,7 +199,7 @@ class Vehicle(pygame.sprite.Sprite):
     def move(self):
         self._update_crossed()
 
-        # A direction has green if its index belongs to the current phase
+        # Una dirección tiene verde si su índice pertenece a la fase actual
         signal_is_green = (self.direction_number in phase_map[currentGreen] and currentYellow==0)
         must_stop_for_signal = (self.crossed==0 and signal_is_green==False)
 
