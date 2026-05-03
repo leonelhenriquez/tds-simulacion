@@ -3,6 +3,7 @@ import time
 import threading
 import pygame
 import sys
+import os
 
 # Default values of signal timers
 defaultGreen = {0:10, 1:10, 2:10, 3:10}
@@ -15,14 +16,14 @@ currentGreen = 0   # Indicates which signal is green currently
 nextGreen = (currentGreen+1)%noOfSignals    # Indicates which signal will turn green next
 currentYellow = 0   # Indicates whether yellow signal is on or off 
 
-speeds = {'car':2.25, 'bus':1.8, 'truck':1.8, 'bike':2.5}  # average speeds of vehicles
+speeds = {'car':2.25, 'bus':1.8, 'truck':1.8, 'motorcycle':2.5}  # average speeds of vehicles
 
 # Coordinates of vehicles' start
 x = {'right':[20,20,20], 'down':[775,747,717], 'left':[1420,1420,1420], 'up':[622,647,677]}    
 y = {'right':[348,370,398], 'down':[0,0,0], 'left':[498,466,436], 'up':[800,800,800]}
 
 vehicles = {'right': {0:[], 1:[], 2:[], 'crossed':0}, 'down': {0:[], 1:[], 2:[], 'crossed':0}, 'left': {0:[], 1:[], 2:[], 'crossed':0}, 'up': {0:[], 1:[], 2:[], 'crossed':0}}
-vehicleTypes = {0:'car', 1:'bus', 2:'truck', 3:'bike'}
+vehicleTypes = {0:'car', 1:'bus', 2:'truck', 3:'motorcycle'}
 directionNumbers = {0:'right', 1:'down', 2:'left', 3:'up'}
 
 # Coordinates of signal image, timer, and vehicle count
@@ -56,7 +57,7 @@ class Vehicle(pygame.sprite.Sprite):
         pygame.sprite.Sprite.__init__(self)
         self.lane = lane
         self.vehicleClass = vehicleClass
-        self.maxSpeed = speeds[vehicleClass] * random.uniform(0.5,2)   # randomize speed of vehicle by multiplying with a random number between 0.75 and 1.25
+        self.maxSpeed = speeds[vehicleClass] * random.uniform(0.5,3)   # randomize speed of vehicle by multiplying with a random number between 0.75 and 1.25
         self.speed = self.maxSpeed
         self.direction_number = direction_number
         self.direction = direction
@@ -65,8 +66,8 @@ class Vehicle(pygame.sprite.Sprite):
         self.crossed = 0
         vehicles[direction][lane].append(self)
         self.index = len(vehicles[direction][lane]) - 1
-        path = "images/" + direction + "/" + vehicleClass + ".png"
-        self.image = pygame.image.load(path)
+        # Load texture (moved to helper method)
+        self._load_texture()
 
         if(len(vehicles[direction][lane])>1 and vehicles[direction][lane][self.index-1].crossed==0):    # if more than 1 vehicle in the lane of vehicle before it has crossed stop line
             if(direction=='right'):
@@ -97,6 +98,40 @@ class Vehicle(pygame.sprite.Sprite):
 
     def render(self, screen):
         screen.blit(self.image, (self.x, self.y))
+
+    def _load_texture(self):
+        # Choose a random image from images/vehicle/<vehicleClass>/ if available
+        dir_path = os.path.join("images", "vehicle", self.vehicleClass)
+        try:
+            files = [f for f in os.listdir(dir_path) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif'))]
+            if files:
+                chosen = random.choice(files)
+                path = os.path.join(dir_path, chosen)
+            else:
+                path = os.path.join("images", "vehicle", "others", self.vehicleClass + ".png")
+        except Exception:
+            path = os.path.join("images", "vehicle", "others", self.vehicleClass + ".png")
+        self.image = pygame.image.load(path).convert_alpha()
+        # Scale before rotating for specific vehicle types
+        orig_w = self.image.get_rect().width
+        orig_h = self.image.get_rect().height
+        if self.vehicleClass == 'car':
+            target_w = 22
+        elif self.vehicleClass == 'motorcycle':
+            target_w = 18
+        else:
+            target_w = orig_w
+        if target_w != orig_w and orig_w > 0:
+            scale_factor = target_w / orig_w
+            new_h = max(1, int(orig_h * scale_factor))
+            self.image = pygame.transform.scale(self.image, (target_w, new_h))
+        # Rotate according to direction
+        if self.direction == 'right':
+            self.image = pygame.transform.rotate(self.image, -90)
+        elif self.direction == 'down':
+            self.image = pygame.transform.rotate(self.image, 180)
+        elif self.direction == 'left':
+            self.image = pygame.transform.rotate(self.image, 90)
 
     def _front_position(self):
         if(self.direction=='right'):
