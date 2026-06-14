@@ -12,6 +12,8 @@ What changed:
   - The map is drawn by MapGenerator as a road/intersection model
   - Traffic signals are placed manually per intersection approach and vehicles
     stop at their corresponding red/yellow signal
+  - Vehicles keep a physical separation, queue behind slower traffic, and
+    change to the parallel same-direction lane only when it is clear
   - Vehicle spawn coords come from MapGenerator.get_spawn_points()
     → vehicles wrap around: exit one edge → reappear on the opposite side
   - Window size matches the generated map
@@ -62,6 +64,11 @@ movingGap           = 15
 decelerationDistance = 120
 accelerationRate    = 0.12
 decelerationRate    = 0.20
+laneChangeTriggerDistance = 85
+laneChangeFrontGap = 45
+laneChangeRearGap = 55
+laneChangeCooldownFrames = 120
+physicalClearance = 2
 
 # ══════════════════════════════════════════════
 #  SPAWN POINT INDEX
@@ -97,6 +104,7 @@ class Vehicle(pygame.sprite.Sprite):
         self.speed           = self.maxSpeed
         self.direction_number = direction_number
         self.direction       = direction
+        self.lane_change_cooldown = 0
 
         # Pick spawn point for this direction + lane
         sp_list = _spawn_by_dir[direction]
@@ -120,9 +128,8 @@ class Vehicle(pygame.sprite.Sprite):
 
             # Keep newly spawned vehicles from stacking on the same lane.
             prev_list = vehicles[direction][lane_idx]
-            if prev_list:
-                prev = prev_list[-1]
-                rect = self.image.get_rect()
+            rect = self.image.get_rect()
+            for prev in prev_list:
                 prev_rect = prev.image.get_rect()
                 if direction == 'right':
                     self.x = min(self.x, prev.x - rect.width - movingGap)
@@ -186,30 +193,186 @@ class Vehicle(pygame.sprite.Sprite):
         elif self.direction == 'left':  return self.x
         return self.y
 
-    def _distance_to_lead_vehicle(self):
-        with vehicle_lock:
-            lane_list = list(vehicles[self.direction].get(self.lane, []))
-        lead_distances = []
+    def _vehicle_rect(self, x=None, y=None):
         rect = self.image.get_rect()
+        return pygame.Rect(
+            round(self.x if x is None else x),
+            round(self.y if y is None else y),
+            rect.width,
+            rect.height,
+        )
 
+    def _progress_bounds(self, x=None, y=None):
+        """Return rear/front positions on an axis that always grows forward."""
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rect = self.image.get_rect()
+        if self.direction == 'right':
+            return x, x + rect.width
+        if self.direction == 'left':
+            return -(x + rect.width), -x
+        if self.direction == 'down':
+            return y, y + rect.height
+        return -(y + rect.height), -y
+
+    def _lead_vehicle_info(self, lane_idx=None):
+        lane_idx = self.lane if lane_idx is None else lane_idx
+        with vehicle_lock:
+            lane_list = list(vehicles[self.direction].get(lane_idx, []))
+
+        _, self_front = self._progress_bounds()
+        closest_distance = float('inf')
+        closest_vehicle = None
         for lead in lane_list:
             if lead is self:
                 continue
-            if getattr(lead, "image", None) is None:
+            if not lead.alive():
                 continue
-            lead_rect = lead.image.get_rect()
-            if self.direction == 'right' and lead.x >= self.x:
-                lead_distances.append(lead.x - movingGap - (self.x + rect.width))
-            elif self.direction == 'down' and lead.y >= self.y:
-                lead_distances.append(lead.y - movingGap - (self.y + rect.height))
-            elif self.direction == 'left' and lead.x <= self.x:
-                lead_distances.append(self.x - (lead.x + lead_rect.width + movingGap))
-            elif self.direction == 'up' and lead.y <= self.y:
-                lead_distances.append(self.y - (lead.y + lead_rect.height + movingGap))
+            lead_rear, lead_front = lead._progress_bounds()
+            if lead_front <= self_front:
+                continue
+            distance = lead_rear - self_front - movingGap
+            if distance < closest_distance:
+                closest_distance = distance
+                closest_vehicle = lead
+        return closest_distance, closest_vehicle
 
-        if not lead_distances:
-            return float('inf')
-        return min(lead_distances)
+    def _distance_to_lead_vehicle(self):
+        return self._lead_vehicle_info()[0]
+
+    def _parallel_lane(self):
+        road_first_lane = (self.lane // 2) * 2
+        other_lane = road_first_lane + (1 - self.lane % 2)
+        if other_lane not in vehicles[self.direction]:
+            return None
+        return other_lane
+
+    def _target_lane_position(self, lane_idx):
+        sp = _spawn_by_dir[self.direction][lane_idx]
+        rect = self.image.get_rect()
+        if self.direction in ('right', 'left'):
+            return self.x, sp.spawn_y - rect.height / 2
+        return sp.spawn_x - rect.width / 2, self.y
+
+    def _near_intersection(self):
+        rect = self.image.get_rect()
+        center_x = self.x + rect.width / 2
+        center_y = self.y + rect.height / 2
+        road_index = self.lane // 2
+        margin = gen.road_width * 0.8
+        for inter in gen.get_intersections():
+            if self.direction in ('right', 'left'):
+                if inter.row == road_index and abs(center_x - inter.cx) < margin:
+                    return True
+            elif inter.col == road_index and abs(center_y - inter.cy) < margin:
+                return True
+        return False
+
+    def _target_lane_is_clear(self, lane_idx, current_distance):
+        target_x, target_y = self._target_lane_position(lane_idx)
+        target_rect = self._vehicle_rect(target_x, target_y).inflate(
+            physicalClearance * 2, physicalClearance * 2
+        )
+        self_rear, self_front = self._progress_bounds()
+        front_clearance = float('inf')
+        rear_clearance = float('inf')
+
+        with vehicle_lock:
+            target_vehicles = list(vehicles[self.direction].get(lane_idx, []))
+
+        for other in target_vehicles:
+            if other is self or not other.alive():
+                continue
+            if target_rect.colliderect(other._vehicle_rect()):
+                return False
+            other_rear, other_front = other._progress_bounds()
+            if other_rear >= self_front:
+                front_clearance = min(front_clearance, other_rear - self_front)
+            elif other_front <= self_rear:
+                rear_clearance = min(rear_clearance, self_rear - other_front)
+            else:
+                return False
+
+        needed_front = max(laneChangeFrontGap, current_distance + movingGap + 20)
+        return front_clearance >= needed_front and rear_clearance >= laneChangeRearGap
+
+    def _change_lane(self, lane_idx):
+        target_x, target_y = self._target_lane_position(lane_idx)
+        with vehicle_lock:
+            old_lane = vehicles[self.direction].get(self.lane, [])
+            if self in old_lane:
+                old_lane.remove(self)
+            vehicles[self.direction].setdefault(lane_idx, []).append(self)
+            self.lane = lane_idx
+
+        sp = _spawn_by_dir[self.direction][lane_idx]
+        self._spawn_x = sp.spawn_x
+        self._spawn_y = sp.spawn_y
+        self._exit_x = sp.exit_x
+        self._exit_y = sp.exit_y
+        self.x, self.y = target_x, target_y
+        self.lane_change_cooldown = laneChangeCooldownFrames
+
+    def _try_change_lane(self, distance_to_lead, lead):
+        if (
+            lead is None
+            or self.lane_change_cooldown > 0
+            or distance_to_lead > laneChangeTriggerDistance
+            or self._near_intersection()
+        ):
+            return False
+
+        desired_speed = self.maxSpeed * SPEED_MULTIPLIER
+        if desired_speed <= lead.speed + 0.25:
+            return False
+
+        target_lane = self._parallel_lane()
+        if target_lane is None or not self._target_lane_is_clear(target_lane, distance_to_lead):
+            return False
+
+        self._change_lane(target_lane)
+        return True
+
+    def _position_is_clear(self, x=None, y=None):
+        candidate = self._vehicle_rect(x, y).inflate(
+            physicalClearance * 2, physicalClearance * 2
+        )
+        with vehicle_lock:
+            active_vehicles = list(simulation)
+        for other in active_vehicles:
+            if other is self or not other.alive():
+                continue
+            if candidate.colliderect(other._vehicle_rect()):
+                return False
+        return True
+
+    def _collision_free_distance(self, requested_distance):
+        """Limit movement so vehicle rectangles never overlap."""
+        if requested_distance <= 0:
+            return 0
+
+        def position_after(distance):
+            if self.direction == 'right':
+                return self.x + distance, self.y
+            if self.direction == 'left':
+                return self.x - distance, self.y
+            if self.direction == 'down':
+                return self.x, self.y + distance
+            return self.x, self.y - distance
+
+        end_x, end_y = position_after(requested_distance)
+        if self._position_is_clear(end_x, end_y):
+            return requested_distance
+
+        low, high = 0.0, requested_distance
+        for _ in range(10):
+            middle = (low + high) / 2
+            test_x, test_y = position_after(middle)
+            if self._position_is_clear(test_x, test_y):
+                low = middle
+            else:
+                high = middle
+        return low
 
     def _move_by(self, distance):
         if   self.direction == 'right': self.x += distance
@@ -227,15 +390,27 @@ class Vehicle(pygame.sprite.Sprite):
 
     def _wrap(self):
         """Teleport back to the spawn edge (wrap-around)."""
+        old_x, old_y = self.x, self.y
         self._place_at_spawn()
+        if not self._position_is_clear():
+            self.x, self.y = old_x, old_y
+            self.speed = 0
+            return False
+        return True
 
     def move(self):
+        if self.lane_change_cooldown > 0:
+            self.lane_change_cooldown -= 1
+
         # Wrap-around: if the vehicle exited, teleport back
         if self._has_exited():
             self._wrap()
             return
 
-        dist_lead = self._distance_to_lead_vehicle()
+        dist_lead, lead = self._lead_vehicle_info()
+        if self._try_change_lane(dist_lead, lead):
+            dist_lead, lead = self._lead_vehicle_info()
+
         dist_signal = traffic_signals.distance_to_stop(
             self.direction,
             self.lane,
@@ -258,7 +433,10 @@ class Vehicle(pygame.sprite.Sprite):
 
         move_dist = min(self.speed, max(0, available))
         if move_dist > 0:
+            move_dist = self._collision_free_distance(move_dist)
             self._move_by(move_dist)
+        if move_dist < 0.05:
+            self.speed = 0
 
 def spawn_vehicle(vehicle_type=None, map_position=None):
     """Spawn a vehicle normally or snap a dropped vehicle to the nearest lane."""
@@ -297,6 +475,9 @@ def spawn_vehicle(vehicle_type=None, map_position=None):
         else:
             vehicle.x = point.spawn_x - rect.width / 2
             vehicle.y = my - rect.height / 2
+        if not vehicle._position_is_clear():
+            _remove_vehicle(vehicle)
+            return None
     return vehicle
 
 
