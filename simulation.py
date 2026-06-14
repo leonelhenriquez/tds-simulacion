@@ -1,3 +1,22 @@
+"""
+simulation.py  -  v3
+=====================
+Traffic simulation using MapGenerator as the procedural map backend.
+
+What's kept from v1:
+  - Vehicle class: texture loading, lane movement, speed model
+  - generateVehicles thread
+  - Main game loop
+
+What changed:
+  - The map is drawn by MapGenerator as a road/intersection model
+  - Traffic signals are intentionally not included here; they can be added
+    later as separate interactive modules
+  - Vehicle spawn coords come from MapGenerator.get_spawn_points()
+    → vehicles wrap around: exit one edge → reappear on the opposite side
+  - Window size matches the generated map
+"""
+
 import random
 import time
 import threading
@@ -5,369 +24,313 @@ import pygame
 import sys
 import os
 
-# Valores por defecto de los temporizadores de los semáforos
-defaultGreen = {0:10, 1:10, 2:10, 3:10}
-defaultRed = 150
-defaultYellow = 5
+from map_generator import MapGenerator
 
-signals = []
-noOfSignals = 4
-currentGreen = 0   # Indica qué semáforo está en verde actualmente
-# Trataremos `currentGreen` como la FASE actual (0 o 1). Cada fase tiene dos semáforos opuestos.
-nextGreen = (currentGreen+1)%2    # Indica qué fase será la siguiente en ponerse en verde
-currentYellow = 0   # Indica si el amarillo está activado o no
+# ══════════════════════════════════════════════
+#  MAP SETUP
+# ══════════════════════════════════════════════
+MAP_COLS       = 4
+MAP_ROWS       = 4
+MAP_BLOCK_SIZE = 160
+MAP_ROAD_WIDTH = 96
 
-# Velocidades promedio por tipo de vehículo
-speeds = {'car':2.25, 'bus':1.8, 'truck':1.8, 'motorcycle':2.5}
+gen = MapGenerator(cols=MAP_COLS, rows=MAP_ROWS,
+                   block_size=MAP_BLOCK_SIZE, road_width=MAP_ROAD_WIDTH)
+gen.generate()
+MAP_W, MAP_H = gen.get_map_size()
 
-# Coordenadas de inicio de los vehículos
-x = {'right':[20,20,20], 'down':[775,747,717], 'left':[1420,1420,1420], 'up':[622,647,677]}    
-y = {'right':[348,370,398], 'down':[0,0,0], 'left':[498,466,436], 'up':[800,800,800]}
+# ══════════════════════════════════════════════
+#  VEHICLE SETTINGS
+# ══════════════════════════════════════════════
+speeds = {'car': 2.25, 'bus': 1.8, 'truck': 1.8, 'motorcycle': 2.5}
 
-vehicles = {'right': {0:[], 1:[], 2:[], 'crossed':0}, 'down': {0:[], 1:[], 2:[], 'crossed':0}, 'left': {0:[], 1:[], 2:[], 'crossed':0}, 'up': {0:[], 1:[], 2:[], 'crossed':0}}
-vehicleTypes = {0:'car', 1:'bus', 2:'truck', 3:'motorcycle'}
-directionNumbers = {0:'right', 1:'down', 2:'left', 3:'up'}
-# Phases: 0 => right(0) + left(2); 1 => down(1) + up(3)
-phase_map = {0: [0, 2], 1: [1, 3]}
+vehicleTypes     = {0: 'car', 1: 'bus', 2: 'truck', 3: 'motorcycle'}
+directionNumbers = {0: 'right', 1: 'down', 2: 'left', 3: 'up'}
 
-# Coordenadas de la imagen del semáforo, temporizador y conteo de vehículos
-signalCoods = [(550,230),(830,230),(830,570),(550,570)]
-signalTimerCoods = [(550,210),(830,210),(830,550),(550,550)]
-
-# Coordenadas de las líneas de parada
-stopLines = {'right': 610, 'down': 330, 'left': 820, 'up': 535}
-defaultStop = {'right': 600, 'down': 320, 'left': 830, 'up': 545}
-# stops = {'right': [580,580,580], 'down': [320,320,320], 'left': [810,810,810], 'up': [545,545,545]}
-
-# Separación entre vehículos
-stoppingGap = 15    # distancia al detenerse
-movingGap = 15   # distancia al moverse
+stoppingGap         = 15
+movingGap           = 15
 decelerationDistance = 120
-accelerationRate = 0.12
-decelerationRate = 0.2
+accelerationRate    = 0.12
+decelerationRate    = 0.20
 
+# ══════════════════════════════════════════════
+#  SPAWN POINT INDEX
+# Organise spawn points by direction so Vehicle can pick
+# a starting position that matches the grid lanes.
+# ══════════════════════════════════════════════
 pygame.init()
 simulation = pygame.sprite.Group()
 
-class TrafficSignal:
-    def __init__(self, red, yellow, green):
-        self.red = red
-        self.yellow = yellow
-        self.green = green
-        self.signalText = ""
-        
-class Vehicle(pygame.sprite.Sprite):
-    def __init__(self, lane, vehicleClass, direction_number, direction):
-        pygame.sprite.Sprite.__init__(self)
-        self.lane = lane
-        self.vehicleClass = vehicleClass
-        self.maxSpeed = speeds[vehicleClass] * random.uniform(0.5,2)   # aleatoriza la velocidad multiplicando por un factor aleatorio
-        self.speed = self.maxSpeed
-        self.direction_number = direction_number
-        self.direction = direction
-        self.x = x[direction][lane]
-        self.y = y[direction][lane]
-        self.crossed = 0
-        vehicles[direction][lane].append(self)
-        self.index = len(vehicles[direction][lane]) - 1
-        # Cargar textura (método auxiliar)
-        self._load_texture()
+_spawn_by_dir: dict = {'right': [], 'left': [], 'up': [], 'down': []}
+for sp in gen.get_spawn_points():
+    _spawn_by_dir[sp.direction].append(sp)
 
-        if(len(vehicles[direction][lane])>1 and vehicles[direction][lane][self.index-1].crossed==0):    # si hay más de 1 vehículo en el carril y el anterior no ha cruzado
-            if(direction=='right'):
-                self.stop = vehicles[direction][lane][self.index-1].stop - vehicles[direction][lane][self.index-1].image.get_rect().width - stoppingGap         # coordenada de parada: parada del siguiente - ancho - separación
-            elif(direction=='left'):
-                self.stop = vehicles[direction][lane][self.index-1].stop + vehicles[direction][lane][self.index-1].image.get_rect().width + stoppingGap
-            elif(direction=='down'):
-                self.stop = vehicles[direction][lane][self.index-1].stop - vehicles[direction][lane][self.index-1].image.get_rect().height - stoppingGap
-            elif(direction=='up'):
-                self.stop = vehicles[direction][lane][self.index-1].stop + vehicles[direction][lane][self.index-1].image.get_rect().height + stoppingGap
-        else:
-            self.stop = defaultStop[direction]
-            
-        # Ajustar coordenadas iniciales y de parada según tamaño de la imagen
-        if(direction=='right'):
-            temp = self.image.get_rect().width + stoppingGap    
-            x[direction][lane] -= temp
-        elif(direction=='left'):
-            temp = self.image.get_rect().width + stoppingGap
-            x[direction][lane] += temp
-        elif(direction=='down'):
-            temp = self.image.get_rect().height + stoppingGap
-            y[direction][lane] -= temp
-        elif(direction=='up'):
-            temp = self.image.get_rect().height + stoppingGap
-            y[direction][lane] += temp
+# Per-lane vehicle queues  {direction: {lane_idx: [vehicles]}}
+vehicles: dict = {
+    'right': {}, 'left': {}, 'up': {}, 'down': {}
+}
+for d, sps in _spawn_by_dir.items():
+    for i, _ in enumerate(sps):
+        vehicles[d][i] = []
+
+# ══════════════════════════════════════════════
+#  VEHICLE CLASS
+# ══════════════════════════════════════════════
+class Vehicle(pygame.sprite.Sprite):
+    def __init__(self, lane_idx, vehicleClass, direction_number, direction):
+        pygame.sprite.Sprite.__init__(self)
+        self.lane            = lane_idx
+        self.vehicleClass    = vehicleClass
+        self.maxSpeed        = speeds[vehicleClass] * random.uniform(0.6, 1.6)
+        self.speed           = self.maxSpeed
+        self.direction_number = direction_number
+        self.direction       = direction
+
+        # Pick spawn point for this direction + lane
+        sp_list = _spawn_by_dir[direction]
+        if not sp_list:
+            self.kill()
+            return
+        sp = sp_list[lane_idx % len(sp_list)]
+        self.x = sp.spawn_x
+        self.y = sp.spawn_y
+        self._exit_x  = sp.exit_x
+        self._exit_y  = sp.exit_y
+        self._spawn_x = sp.spawn_x
+        self._spawn_y = sp.spawn_y
+
+        if lane_idx not in vehicles[direction]:
+            vehicles[direction][lane_idx] = []
+        vehicles[direction][lane_idx].append(self)
+        self.index = len(vehicles[direction][lane_idx]) - 1
+
+        self._load_texture()
+        self._place_at_spawn()
+
+        # Keep newly spawned vehicles from stacking on the same lane.
+        prev_list = vehicles[direction][lane_idx]
+        if len(prev_list) > 1:
+            prev = prev_list[self.index - 1]
+            rect = self.image.get_rect()
+            prev_rect = prev.image.get_rect()
+            if direction == 'right':
+                self.x = min(self.x, prev.x - rect.width - movingGap)
+            elif direction == 'left':
+                self.x = max(self.x, prev.x + prev_rect.width + movingGap)
+            elif direction == 'down':
+                self.y = min(self.y, prev.y - rect.height - movingGap)
+            elif direction == 'up':
+                self.y = max(self.y, prev.y + prev_rect.height + movingGap)
+
         simulation.add(self)
 
+    # ── texture ─────────────────────────────────────────────────────────
+    def _load_texture(self):
+        dir_path = os.path.join("images", "vehicle", self.vehicleClass)
+        try:
+            files = [f for f in os.listdir(dir_path)
+                     if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif'))]
+            path = os.path.join(dir_path, random.choice(files)) if files else \
+                   os.path.join("images", "vehicle", "others", self.vehicleClass + ".png")
+        except Exception:
+            path = os.path.join("images", "vehicle", "others", self.vehicleClass + ".png")
+
+        self.image = pygame.image.load(path).convert_alpha()
+        orig_w = self.image.get_rect().width
+        orig_h = self.image.get_rect().height
+        target_w = 22 if self.vehicleClass == 'car' else \
+                   18 if self.vehicleClass == 'motorcycle' else orig_w
+        if target_w != orig_w and orig_w > 0:
+            scale = target_w / orig_w
+            self.image = pygame.transform.scale(
+                self.image, (target_w, max(1, int(orig_h * scale))))
+
+        if   self.direction == 'right': self.image = pygame.transform.rotate(self.image, -90)
+        elif self.direction == 'down':  self.image = pygame.transform.rotate(self.image, 180)
+        elif self.direction == 'left':  self.image = pygame.transform.rotate(self.image,  90)
+
+    # ── movement helpers ─────────────────────────────────────────────────
     def render(self, screen):
         screen.blit(self.image, (self.x, self.y))
 
-    def _load_texture(self):
-        # Elegir una imagen aleatoria desde images/vehicle/<vehicleClass>/ si existe
-        dir_path = os.path.join("images", "vehicle", self.vehicleClass)
-        try:
-            files = [f for f in os.listdir(dir_path) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif'))]
-            if files:
-                chosen = random.choice(files)
-                path = os.path.join(dir_path, chosen)
-            else:
-                path = os.path.join("images", "vehicle", "others", self.vehicleClass + ".png")
-        except Exception:
-            path = os.path.join("images", "vehicle", "others", self.vehicleClass + ".png")
-        self.image = pygame.image.load(path).convert_alpha()
-        # Escalar antes de rotar para tipos específicos
-        orig_w = self.image.get_rect().width
-        orig_h = self.image.get_rect().height
-        if self.vehicleClass == 'car':
-            target_w = 22
-        elif self.vehicleClass == 'motorcycle':
-            target_w = 18
-        else:
-            target_w = orig_w
-        if target_w != orig_w and orig_w > 0:
-            scale_factor = target_w / orig_w
-            new_h = max(1, int(orig_h * scale_factor))
-            self.image = pygame.transform.scale(self.image, (target_w, new_h))
-        # Rotar según la dirección
+    def _place_at_spawn(self):
+        rect = self.image.get_rect()
         if self.direction == 'right':
-            self.image = pygame.transform.rotate(self.image, -90)
-        elif self.direction == 'down':
-            self.image = pygame.transform.rotate(self.image, 180)
+            self.x = self._spawn_x - rect.width - stoppingGap
+            self.y = self._spawn_y - rect.height / 2
         elif self.direction == 'left':
-            self.image = pygame.transform.rotate(self.image, 90)
+            self.x = self._spawn_x + stoppingGap
+            self.y = self._spawn_y - rect.height / 2
+        elif self.direction == 'down':
+            self.x = self._spawn_x - rect.width / 2
+            self.y = self._spawn_y - rect.height - stoppingGap
+        elif self.direction == 'up':
+            self.x = self._spawn_x - rect.width / 2
+            self.y = self._spawn_y + stoppingGap
 
     def _front_position(self):
-        if(self.direction=='right'):
-            return self.x + self.image.get_rect().width
-        elif(self.direction=='down'):
-            return self.y + self.image.get_rect().height
-        elif(self.direction=='left'):
-            return self.x
+        if   self.direction == 'right': return self.x + self.image.get_rect().width
+        elif self.direction == 'down':  return self.y + self.image.get_rect().height
+        elif self.direction == 'left':  return self.x
         return self.y
 
-    def _distance_to_stop(self):
-        front = self._front_position()
-        if(self.direction=='right' or self.direction=='down'):
-            return self.stop - front
-        return front - self.stop
-
     def _distance_to_lead_vehicle(self):
-        if(self.index==0):
+        lane_list = vehicles[self.direction].get(self.lane, [])
+        lead_distances = []
+        rect = self.image.get_rect()
+
+        for lead in lane_list:
+            if lead is self:
+                continue
+            lead_rect = lead.image.get_rect()
+            if self.direction == 'right' and lead.x >= self.x:
+                lead_distances.append(lead.x - movingGap - (self.x + rect.width))
+            elif self.direction == 'down' and lead.y >= self.y:
+                lead_distances.append(lead.y - movingGap - (self.y + rect.height))
+            elif self.direction == 'left' and lead.x <= self.x:
+                lead_distances.append(self.x - (lead.x + lead_rect.width + movingGap))
+            elif self.direction == 'up' and lead.y <= self.y:
+                lead_distances.append(self.y - (lead.y + lead_rect.height + movingGap))
+
+        if not lead_distances:
             return float('inf')
-
-        lead_vehicle = vehicles[self.direction][self.lane][self.index-1]
-        if(self.direction=='right'):
-            front = self.x + self.image.get_rect().width
-            limit = lead_vehicle.x - movingGap
-            return limit - front
-        elif(self.direction=='down'):
-            front = self.y + self.image.get_rect().height
-            limit = lead_vehicle.y - movingGap
-            return limit - front
-        elif(self.direction=='left'):
-            front = self.x
-            limit = lead_vehicle.x + lead_vehicle.image.get_rect().width + movingGap
-            return front - limit
-
-        front = self.y
-        limit = lead_vehicle.y + lead_vehicle.image.get_rect().height + movingGap
-        return front - limit
-
-    def _update_crossed(self):
-        if(self.crossed==1):
-            return
-
-        front = self._front_position()
-        if(self.direction=='right' or self.direction=='down'):
-            if(front>stopLines[self.direction]):
-                self.crossed = 1
-        else:
-            if(front<stopLines[self.direction]):
-                self.crossed = 1
+        return min(lead_distances)
 
     def _move_by(self, distance):
-        if(self.direction=='right'):
-            self.x += distance
-        elif(self.direction=='down'):
-            self.y += distance
-        elif(self.direction=='left'):
-            self.x -= distance
-        elif(self.direction=='up'):
-            self.y -= distance
+        if   self.direction == 'right': self.x += distance
+        elif self.direction == 'down':  self.y += distance
+        elif self.direction == 'left':  self.x -= distance
+        elif self.direction == 'up':    self.y -= distance
+
+    def _has_exited(self):
+        """Returns True when the vehicle has left the map on the far side."""
+        if   self.direction == 'right': return self.x > MAP_W + 60
+        elif self.direction == 'left':  return self.x + self.image.get_rect().width < -60
+        elif self.direction == 'down':  return self.y > MAP_H + 60
+        elif self.direction == 'up':    return self.y + self.image.get_rect().height < -60
+        return False
+
+    def _wrap(self):
+        """Teleport back to the spawn edge (wrap-around)."""
+        self._place_at_spawn()
 
     def move(self):
-        self._update_crossed()
+        # Wrap-around: if the vehicle exited, teleport back
+        if self._has_exited():
+            self._wrap()
+            return
 
-        # Una dirección tiene verde si su índice pertenece a la fase actual
-        signal_is_green = (self.direction_number in phase_map[currentGreen] and currentYellow==0)
-        must_stop_for_signal = (self.crossed==0 and signal_is_green==False)
+        dist_lead = self._distance_to_lead_vehicle()
+        available = dist_lead
 
-        distance_to_stop = self._distance_to_stop() if must_stop_for_signal else float('inf')
-        distance_to_lead = self._distance_to_lead_vehicle()
-        available_distance = min(distance_to_stop, distance_to_lead)
-
-        if(available_distance<=0):
+        if available <= 0:
             target_speed = 0
-        elif(available_distance<decelerationDistance):
-            target_speed = self.maxSpeed * (available_distance/decelerationDistance)
+        elif available < decelerationDistance:
+            target_speed = self.maxSpeed * (available / decelerationDistance)
         else:
             target_speed = self.maxSpeed
 
-        if(self.speed<target_speed):
+        if self.speed < target_speed:
             self.speed = min(target_speed, self.speed + accelerationRate)
         else:
             self.speed = max(target_speed, self.speed - decelerationRate)
 
-        move_distance = min(self.speed, max(0, available_distance))
-        if(move_distance>0):
-            self._move_by(move_distance)
+        move_dist = min(self.speed, max(0, available))
+        if move_dist > 0:
+            self._move_by(move_dist)
 
-        self._update_crossed()
-
-# Initialization of signals with default values
-def initialize():
-    ts1 = TrafficSignal(0, defaultYellow, defaultGreen[0])
-    signals.append(ts1)
-    ts2 = TrafficSignal(ts1.red+ts1.yellow+ts1.green, defaultYellow, defaultGreen[1])
-    signals.append(ts2)
-    ts3 = TrafficSignal(defaultRed, defaultYellow, defaultGreen[2])
-    signals.append(ts3)
-    ts4 = TrafficSignal(defaultRed, defaultYellow, defaultGreen[3])
-    signals.append(ts4)
-    repeat()
-
-def repeat():
-    global currentGreen, currentYellow, nextGreen
-    # While the green time for the current phase (use first signal of phase) is > 0
-    green_idx = phase_map[currentGreen][0]
-    while(signals[green_idx].green>0):
-        updateValues()
-        time.sleep(1)
-    currentYellow = 1   # set yellow signal on
-    # reset stop coordinates of lanes and vehicles for all directions in current phase
-    for dir_idx in phase_map[currentGreen]:
-        dir_name = directionNumbers[dir_idx]
-        for i in range(0,3):
-            for vehicle in vehicles[dir_name][i]:
-                vehicle.stop = defaultStop[dir_name]
-    # While yellow time for current phase > 0
-    yellow_idx = phase_map[currentGreen][0]
-    while(signals[yellow_idx].yellow>0):
-        updateValues()
-        time.sleep(1)
-    currentYellow = 0   # set yellow signal off
-
-    # reset all signal times of current phase to default times (both signals in phase)
-    for dir_idx in phase_map[currentGreen]:
-        signals[dir_idx].green = defaultGreen[dir_idx]
-        signals[dir_idx].yellow = defaultYellow
-        signals[dir_idx].red = defaultRed
-
-    # advance phase
-    currentGreen = nextGreen # set next phase as green phase
-    nextGreen = (currentGreen+1)%2    # set next phase
-    # set red time for signals in next phase as sum of current green+yellow
-    red_time = signals[phase_map[currentGreen][0]].yellow + signals[phase_map[currentGreen][0]].green
-    for dir_idx in phase_map[nextGreen]:
-        signals[dir_idx].red = red_time
-    repeat()
-
-# Update values of the signal timers after every second
-def updateValues():
-    for i in range(0, noOfSignals):
-        # If signal i is part of the current active phase, decrement its green/yellow
-        if i in phase_map[currentGreen]:
-            if currentYellow==0:
-                signals[i].green -= 1
-            else:
-                signals[i].yellow -= 1
-        else:
-            signals[i].red -= 1
-
-# Generating vehicles in the simulation
 def generateVehicles():
-    while(True):
-        vehicle_type = random.randint(0,3)
-        lane_number = random.randint(1,2)
-        temp = random.randint(0,99)
-        direction_number = 0
-        dist = [25,50,75,100]
-        if(temp<dist[0]):
-            direction_number = 0
-        elif(temp<dist[1]):
-            direction_number = 1
-        elif(temp<dist[2]):
-            direction_number = 2
-        elif(temp<dist[3]):
-            direction_number = 3
-        Vehicle(lane_number, vehicleTypes[vehicle_type], direction_number, directionNumbers[direction_number])
-        # time.sleep(random.randint(1,100)/100)
-        time.sleep(round(random.uniform(0.1,2), 2))
+    while True:
+        vehicle_type     = random.randint(0, 3)
+        direction_number = random.randint(0, 3)
+        direction        = directionNumbers[direction_number]
+        lane_count       = len(_spawn_by_dir[direction])
+        if lane_count == 0:
+            time.sleep(0.5)
+            continue
+        lane_idx = random.randint(0, lane_count - 1)
+        Vehicle(lane_idx, vehicleTypes[vehicle_type], direction_number, direction)
+        time.sleep(round(random.uniform(0.15, 2.0), 2))
 
-class Main:
-    thread1 = threading.Thread(name="initialization",target=initialize, args=())    # initialization
-    thread1.daemon = True
-    thread1.start()
+# ══════════════════════════════════════════════
+#  OVERLAY CONTROLS
+# ══════════════════════════════════════════════
+def _overlay_button_rects():
+    bw, bh, pad, gap = 100, 42, 18, 10
+    play_r = pygame.Rect(pad, pad, bw, bh)
+    reset_r = pygame.Rect(pad + bw + gap, pad, bw, bh)
+    return play_r, reset_r
 
-    # Colours 
-    black = (0, 0, 0)
-    white = (255, 255, 255)
+def _draw_overlay_buttons(surface, font, is_playing):
+    play_r, reset_r = _overlay_button_rects()
+    labels = [(play_r, "Pause" if is_playing else "Play"),
+              (reset_r, "Reset")]
+    for rect, label in labels:
+        pygame.draw.rect(surface, (242, 246, 252), rect, border_radius=10)
+        pygame.draw.rect(surface, (35, 43, 55), rect, 1, border_radius=10)
+        txt = font.render(label, True, (15, 23, 35))
+        surface.blit(txt, (rect.x + (rect.w - txt.get_width()) // 2,
+                           rect.y + (rect.h - txt.get_height()) // 2))
+    return play_r, reset_r
 
-    # Screensize 
-    screenWidth = 1400
-    screenHeight = 922
-    screenSize = (screenWidth, screenHeight)
+# ══════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════
+def main():
+    screen = pygame.display.set_mode((MAP_W, MAP_H), pygame.RESIZABLE)
+    pygame.display.set_caption("Simulador de Tráfico")
 
-    # Setting background image i.e. image of intersection
-    background = pygame.image.load('images/intersection.png')
+    btn_font     = pygame.font.SysFont("arial", 18, bold=True)
 
-    screen = pygame.display.set_mode(screenSize)
-    pygame.display.set_caption("SIMULATION")
+    logical_size = (MAP_W, MAP_H)
+    map_surf     = pygame.Surface(logical_size)
+    clock        = pygame.time.Clock()
+    is_playing   = True
 
-    # Loading signal images and font
-    redSignal = pygame.image.load('images/signals/red.png')
-    yellowSignal = pygame.image.load('images/signals/yellow.png')
-    greenSignal = pygame.image.load('images/signals/green.png')
-    font = pygame.font.Font(None, 30)
-
-    thread2 = threading.Thread(name="generateVehicles",target=generateVehicles, args=())    # Generating vehicles
-    thread2.daemon = True
-    thread2.start()
+    # Start vehicle generation thread
+    t2 = threading.Thread(name="generateVehicles", target=generateVehicles, daemon=True)
+    t2.start()
 
     while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                pygame.quit()
                 sys.exit()
+            elif event.type == pygame.VIDEORESIZE:
+                screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    pygame.quit()
+                    sys.exit()
+                elif event.key == pygame.K_SPACE:
+                    is_playing = not is_playing
+                elif event.key == pygame.K_r:
+                    gen.reset()
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                pr, rr = _overlay_button_rects()
+                if pr.collidepoint(event.pos):
+                    is_playing = not is_playing
+                elif rr.collidepoint(event.pos):
+                    gen.reset()
 
-        screen.blit(background,(0,0))   # display background in simulation
-        for i in range(0,noOfSignals):  # display signal and set timer according to current status: green, yellow, or red
-            # If this direction belongs to the active phase, show green/yellow
-            if i in phase_map[currentGreen]:
-                if currentYellow==1:
-                    signals[i].signalText = signals[i].yellow
-                    screen.blit(yellowSignal, signalCoods[i])
-                else:
-                    signals[i].signalText = signals[i].green
-                    screen.blit(greenSignal, signalCoods[i])
-            else:
-                if signals[i].red<=10:
-                    signals[i].signalText = signals[i].red
-                else:
-                    signals[i].signalText = "---"
-                screen.blit(redSignal, signalCoods[i])
-        signalTexts = ["","","",""]
+        # ── Draw map model ──
+        gen.draw(map_surf)
 
-        # display signal timer
-        for i in range(0,noOfSignals):  
-            signalTexts[i] = font.render(str(signals[i].signalText), True, white, black)
-            screen.blit(signalTexts[i],signalTimerCoods[i])
+        # ── Draw & move vehicles ──
+        if is_playing:
+            for vehicle in simulation:
+                map_surf.blit(vehicle.image, (vehicle.x, vehicle.y))
+                vehicle.move()
+        else:
+            for vehicle in simulation:
+                map_surf.blit(vehicle.image, (vehicle.x, vehicle.y))
 
-        # display the vehicles
-        for vehicle in simulation:  
-            screen.blit(vehicle.image, [vehicle.x, vehicle.y])
-            vehicle.move()
-        pygame.display.update()
+        # ── Scale map scene, then draw fixed-size overlay controls ──
+        scaled = pygame.transform.smoothscale(map_surf, screen.get_size())
+        screen.blit(scaled, (0, 0))
+        _draw_overlay_buttons(screen, btn_font, is_playing)
+        pygame.display.flip()
+        clock.tick(60)
 
-
-Main()
+if __name__ == "__main__":
+    main()
