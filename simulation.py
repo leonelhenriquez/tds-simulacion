@@ -47,6 +47,8 @@ speeds = {'car': 2.25, 'bus': 1.8, 'truck': 1.8, 'motorcycle': 2.5}
 vehicleTypes     = {0: 'car', 1: 'bus', 2: 'truck', 3: 'motorcycle'}
 directionNumbers = {0: 'right', 1: 'down', 2: 'left', 3: 'up'}
 
+MAX_VEHICLES = 80
+
 stoppingGap         = 15
 movingGap           = 15
 decelerationDistance = 120
@@ -60,6 +62,7 @@ decelerationRate    = 0.20
 # ══════════════════════════════════════════════
 pygame.init()
 simulation = pygame.sprite.Group()
+vehicle_lock = threading.RLock()
 
 _spawn_by_dir: dict = {'right': [], 'left': [], 'up': [], 'down': []}
 for sp in gen.get_spawn_points():
@@ -99,30 +102,31 @@ class Vehicle(pygame.sprite.Sprite):
         self._spawn_x = sp.spawn_x
         self._spawn_y = sp.spawn_y
 
-        if lane_idx not in vehicles[direction]:
-            vehicles[direction][lane_idx] = []
-        vehicles[direction][lane_idx].append(self)
-        self.index = len(vehicles[direction][lane_idx]) - 1
-
         self._load_texture()
         self._place_at_spawn()
 
-        # Keep newly spawned vehicles from stacking on the same lane.
-        prev_list = vehicles[direction][lane_idx]
-        if len(prev_list) > 1:
-            prev = prev_list[self.index - 1]
-            rect = self.image.get_rect()
-            prev_rect = prev.image.get_rect()
-            if direction == 'right':
-                self.x = min(self.x, prev.x - rect.width - movingGap)
-            elif direction == 'left':
-                self.x = max(self.x, prev.x + prev_rect.width + movingGap)
-            elif direction == 'down':
-                self.y = min(self.y, prev.y - rect.height - movingGap)
-            elif direction == 'up':
-                self.y = max(self.y, prev.y + prev_rect.height + movingGap)
+        with vehicle_lock:
+            if lane_idx not in vehicles[direction]:
+                vehicles[direction][lane_idx] = []
 
-        simulation.add(self)
+            # Keep newly spawned vehicles from stacking on the same lane.
+            prev_list = vehicles[direction][lane_idx]
+            if prev_list:
+                prev = prev_list[-1]
+                rect = self.image.get_rect()
+                prev_rect = prev.image.get_rect()
+                if direction == 'right':
+                    self.x = min(self.x, prev.x - rect.width - movingGap)
+                elif direction == 'left':
+                    self.x = max(self.x, prev.x + prev_rect.width + movingGap)
+                elif direction == 'down':
+                    self.y = min(self.y, prev.y - rect.height - movingGap)
+                elif direction == 'up':
+                    self.y = max(self.y, prev.y + prev_rect.height + movingGap)
+
+            vehicles[direction][lane_idx].append(self)
+            self.index = len(vehicles[direction][lane_idx]) - 1
+            simulation.add(self)
 
     # ── texture ─────────────────────────────────────────────────────────
     def _load_texture(self):
@@ -175,12 +179,15 @@ class Vehicle(pygame.sprite.Sprite):
         return self.y
 
     def _distance_to_lead_vehicle(self):
-        lane_list = vehicles[self.direction].get(self.lane, [])
+        with vehicle_lock:
+            lane_list = list(vehicles[self.direction].get(self.lane, []))
         lead_distances = []
         rect = self.image.get_rect()
 
         for lead in lane_list:
             if lead is self:
+                continue
+            if getattr(lead, "image", None) is None:
                 continue
             lead_rect = lead.image.get_rect()
             if self.direction == 'right' and lead.x >= self.x:
@@ -241,6 +248,11 @@ class Vehicle(pygame.sprite.Sprite):
 
 def generateVehicles():
     while True:
+        with vehicle_lock:
+            if len(simulation) >= MAX_VEHICLES:
+                time.sleep(0.5)
+                continue
+
         vehicle_type     = random.randint(0, 3)
         direction_number = random.randint(0, 3)
         direction        = directionNumbers[direction_number]
@@ -317,12 +329,15 @@ def main():
         gen.draw(map_surf)
 
         # ── Draw & move vehicles ──
+        with vehicle_lock:
+            active_vehicles = list(simulation)
+
         if is_playing:
-            for vehicle in simulation:
+            for vehicle in active_vehicles:
                 map_surf.blit(vehicle.image, (vehicle.x, vehicle.y))
                 vehicle.move()
         else:
-            for vehicle in simulation:
+            for vehicle in active_vehicles:
                 map_surf.blit(vehicle.image, (vehicle.x, vehicle.y))
 
         # ── Scale map scene, then draw fixed-size overlay controls ──
