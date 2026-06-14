@@ -10,8 +10,8 @@ What's kept from v1:
 
 What changed:
   - The map is drawn by MapGenerator as a road/intersection model
-  - Traffic signals are intentionally not included here; they can be added
-    later as separate interactive modules
+  - Traffic signals are placed manually per intersection approach and vehicles
+    stop at their corresponding red/yellow signal
   - Vehicle spawn coords come from MapGenerator.get_spawn_points()
     → vehicles wrap around: exit one edge → reappear on the opposite side
   - Window size matches the generated map
@@ -26,6 +26,7 @@ import os
 
 from control_panel import ControlPanel
 from map_generator import MapGenerator
+from traffic_signals import TrafficSignalSystem
 
 # ══════════════════════════════════════════════
 #  MAP SETUP
@@ -54,6 +55,7 @@ directionNumbers = {0: 'right', 1: 'down', 2: 'left', 3: 'up'}
 MAX_VEHICLES = 46
 SPEED_MULTIPLIER = 1.0
 SPAWN_VEHICLE_TYPE = 'random'
+SIGNAL_SECONDS = 8.0
 
 stoppingGap         = 15
 movingGap           = 15
@@ -69,7 +71,7 @@ decelerationRate    = 0.20
 pygame.init()
 simulation = pygame.sprite.Group()
 vehicle_lock = threading.RLock()
-traffic_signals = []
+traffic_signals = TrafficSignalSystem(gen)
 
 _spawn_by_dir: dict = {'right': [], 'left': [], 'up': [], 'down': []}
 for sp in gen.get_spawn_points():
@@ -234,7 +236,13 @@ class Vehicle(pygame.sprite.Sprite):
             return
 
         dist_lead = self._distance_to_lead_vehicle()
-        available = dist_lead
+        dist_signal = traffic_signals.distance_to_stop(
+            self.direction,
+            self.lane,
+            self._front_position(),
+            SIGNAL_SECONDS,
+        )
+        available = min(dist_lead, dist_signal)
 
         if available <= 0:
             target_speed = 0
@@ -370,40 +378,6 @@ def _screen_to_map(position, map_rect):
     )
 
 
-def _snap_signal_to_intersection(position):
-    intersections = gen.get_intersections()
-    if not intersections:
-        return position
-    nearest = min(
-        intersections,
-        key=lambda inter: (inter.cx - position[0]) ** 2 + (inter.cy - position[1]) ** 2,
-    )
-    return nearest.cx, nearest.cy
-
-
-def _draw_traffic_signals(surface, signal_seconds):
-    cycle = signal_seconds * 2 + 2
-    phase = time.monotonic() % cycle
-    if phase < signal_seconds:
-        active = 'green'
-    elif phase < signal_seconds + 2:
-        active = 'yellow'
-    else:
-        active = 'red'
-
-    colors = {
-        'red': (240, 48, 65),
-        'yellow': (255, 190, 0),
-        'green': (0, 205, 125),
-    }
-    for x, y in traffic_signals:
-        housing = pygame.Rect(int(x - 7), int(y - 19), 14, 38)
-        pygame.draw.rect(surface, (9, 15, 23), housing, border_radius=5)
-        for index, state in enumerate(('red', 'yellow', 'green')):
-            color = colors[state] if state == active else (60, 65, 70)
-            pygame.draw.circle(surface, color, (int(x), int(y - 12 + index * 12)), 4)
-
-
 def _simulation_stats():
     with vehicle_lock:
         active = list(simulation)
@@ -427,12 +401,13 @@ def _reset_simulation():
     gen.reset()
     _clear_vehicles()
     traffic_signals.clear()
+    traffic_signals.refresh_targets()
 
 # ══════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════
 def main():
-    global MAX_VEHICLES, SPEED_MULTIPLIER, SPAWN_VEHICLE_TYPE
+    global MAX_VEHICLES, SPEED_MULTIPLIER, SPAWN_VEHICLE_TYPE, SIGNAL_SECONDS
 
     panel = ControlPanel()
     initial_size = (MAP_W + panel.WIDTH, min(MAP_H, 850))
@@ -473,7 +448,7 @@ def main():
                 elif action == 'drop_signal':
                     map_position = _screen_to_map(panel_action['pos'], map_rect)
                     if map_position is not None:
-                        traffic_signals.append(_snap_signal_to_intersection(map_position))
+                        traffic_signals.place_near(map_position)
                 if action not in ('panel_clicked',):
                     continue
 
@@ -491,15 +466,22 @@ def main():
                     is_playing = not is_playing
                 elif rr.collidepoint(event.pos):
                     _reset_simulation()
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                map_position = _screen_to_map(event.pos, map_rect)
+                if map_position is not None:
+                    traffic_signals.remove_near(map_position)
 
         MAX_VEHICLES = panel.max_vehicles
         SPEED_MULTIPLIER = panel.speed_multiplier
         SPAWN_VEHICLE_TYPE = panel.selected_vehicle_key
+        SIGNAL_SECONDS = panel.signal_seconds
         _trim_vehicles(MAX_VEHICLES)
 
         # ── Draw map model ──
         gen.draw(map_surf)
-        _draw_traffic_signals(map_surf, panel.signal_seconds)
+        if panel.drag_payload == 'signal':
+            traffic_signals.draw_targets(map_surf)
+        traffic_signals.draw(map_surf, SIGNAL_SECONDS)
 
         # ── Draw & move vehicles ──
         with vehicle_lock:

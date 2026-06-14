@@ -61,6 +61,10 @@ class ControlPanel:
     def selected_vehicle_key(self) -> str:
         return self.VEHICLE_KEYS[self.vehicle_type]
 
+    @property
+    def drag_payload(self) -> Optional[str]:
+        return self._drag_payload
+
     def _max_scroll(self) -> int:
         return max(0, self.CONTENT_HEIGHT - self._panel_rect.height)
 
@@ -244,8 +248,12 @@ class ControlPanel:
         self._controls["drag_signal"] = signal
         self._dashed_button(surf, vehicle, BLUE, "Arrastrar vehículo", "vehicle")
         self._dashed_button(surf, signal, YELLOW, "Arrastrar semáforo", "signal")
-        help_text = "Arrastra un elemento sobre una vía del mapa."
-        surf.blit(self.font_small.render(help_text, True, MUTED), (28, 580))
+        help_lines = (
+            "Semáforos: coloca uno en cada acceso.",
+            "Clic derecho sobre uno para eliminarlo.",
+        )
+        for index, line in enumerate(help_lines):
+            surf.blit(self.font_small.render(line, True, MUTED), (28, 572 + index * 17))
 
     def _dashed_button(
         self, surf: pygame.Surface, rect: pygame.Rect, color: Color, label: str, icon: str
