@@ -42,6 +42,9 @@ MAP_W, MAP_H = gen.get_map_size()
 # ══════════════════════════════════════════════
 #  VEHICLE SETTINGS
 # ══════════════════════════════════════════════
+VEHICLE_WIDTHS = {'car': 14, 'motorcycle': 12, 'bus': 14, 'truck': 14}
+OTHER_WIDTH_SCALE = 0.6
+
 speeds = {'car': 2.25, 'bus': 1.8, 'truck': 1.8, 'motorcycle': 2.5}
 
 vehicleTypes     = {0: 'car', 1: 'bus', 2: 'truck', 3: 'motorcycle'}
@@ -142,8 +145,7 @@ class Vehicle(pygame.sprite.Sprite):
         self.image = pygame.image.load(path).convert_alpha()
         orig_w = self.image.get_rect().width
         orig_h = self.image.get_rect().height
-        target_w = 22 if self.vehicleClass == 'car' else \
-                   18 if self.vehicleClass == 'motorcycle' else orig_w
+        target_w = VEHICLE_WIDTHS.get(self.vehicleClass, int(orig_w * OTHER_WIDTH_SCALE))
         if target_w != orig_w and orig_w > 0:
             scale = target_w / orig_w
             self.image = pygame.transform.scale(
