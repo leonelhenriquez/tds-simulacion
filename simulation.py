@@ -24,6 +24,7 @@ import pygame
 import sys
 import os
 
+from control_panel import ControlPanel
 from map_generator import MapGenerator
 
 # ══════════════════════════════════════════════
@@ -50,7 +51,9 @@ speeds = {'car': 2.25, 'bus': 1.8, 'truck': 1.8, 'motorcycle': 2.5}
 vehicleTypes     = {0: 'car', 1: 'bus', 2: 'truck', 3: 'motorcycle'}
 directionNumbers = {0: 'right', 1: 'down', 2: 'left', 3: 'up'}
 
-MAX_VEHICLES = 80
+MAX_VEHICLES = 46
+SPEED_MULTIPLIER = 1.0
+SPAWN_VEHICLE_TYPE = 'random'
 
 stoppingGap         = 15
 movingGap           = 15
@@ -66,6 +69,7 @@ decelerationRate    = 0.20
 pygame.init()
 simulation = pygame.sprite.Group()
 vehicle_lock = threading.RLock()
+traffic_signals = []
 
 _spawn_by_dir: dict = {'right': [], 'left': [], 'up': [], 'down': []}
 for sp in gen.get_spawn_points():
@@ -235,9 +239,9 @@ class Vehicle(pygame.sprite.Sprite):
         if available <= 0:
             target_speed = 0
         elif available < decelerationDistance:
-            target_speed = self.maxSpeed * (available / decelerationDistance)
+            target_speed = self.maxSpeed * SPEED_MULTIPLIER * (available / decelerationDistance)
         else:
-            target_speed = self.maxSpeed
+            target_speed = self.maxSpeed * SPEED_MULTIPLIER
 
         if self.speed < target_speed:
             self.speed = min(target_speed, self.speed + accelerationRate)
@@ -248,35 +252,92 @@ class Vehicle(pygame.sprite.Sprite):
         if move_dist > 0:
             self._move_by(move_dist)
 
+def spawn_vehicle(vehicle_type=None, map_position=None):
+    """Spawn a vehicle normally or snap a dropped vehicle to the nearest lane."""
+    if vehicle_type in (None, 'random'):
+        vehicle_type = vehicleTypes[random.randint(0, 3)]
+
+    if map_position is None:
+        direction_number = random.randint(0, 3)
+        direction = directionNumbers[direction_number]
+        lane_count = len(_spawn_by_dir[direction])
+        if lane_count == 0:
+            return None
+        lane_idx = random.randint(0, lane_count - 1)
+    else:
+        mx, my = map_position
+        candidates = []
+        for direction, points in _spawn_by_dir.items():
+            for lane_idx, point in enumerate(points):
+                distance = abs(my - point.spawn_y) if direction in ('right', 'left') \
+                    else abs(mx - point.spawn_x)
+                candidates.append((distance, direction, lane_idx, point))
+        if not candidates:
+            return None
+        _, direction, lane_idx, point = min(candidates, key=lambda item: item[0])
+        direction_number = next(
+            number for number, name in directionNumbers.items() if name == direction
+        )
+
+    vehicle = Vehicle(lane_idx, vehicle_type, direction_number, direction)
+    if map_position is not None and vehicle.alive():
+        mx, my = map_position
+        rect = vehicle.image.get_rect()
+        if direction in ('right', 'left'):
+            vehicle.x = mx - rect.width / 2
+            vehicle.y = point.spawn_y - rect.height / 2
+        else:
+            vehicle.x = point.spawn_x - rect.width / 2
+            vehicle.y = my - rect.height / 2
+    return vehicle
+
+
+def _remove_vehicle(vehicle):
+    with vehicle_lock:
+        lane = vehicles.get(vehicle.direction, {}).get(vehicle.lane, [])
+        if vehicle in lane:
+            lane.remove(vehicle)
+        vehicle.kill()
+
+
+def _trim_vehicles(limit):
+    with vehicle_lock:
+        excess = max(0, len(simulation) - limit)
+        to_remove = list(simulation)[-excess:] if excess else []
+    for vehicle in to_remove:
+        _remove_vehicle(vehicle)
+
+
+def _clear_vehicles():
+    with vehicle_lock:
+        for direction_lanes in vehicles.values():
+            for lane in direction_lanes.values():
+                lane.clear()
+        simulation.empty()
+
+
 def generateVehicles():
     while True:
         with vehicle_lock:
-            if len(simulation) >= MAX_VEHICLES:
-                time.sleep(0.5)
-                continue
-
-        vehicle_type     = random.randint(0, 3)
-        direction_number = random.randint(0, 3)
-        direction        = directionNumbers[direction_number]
-        lane_count       = len(_spawn_by_dir[direction])
-        if lane_count == 0:
+            at_capacity = len(simulation) >= MAX_VEHICLES
+        if at_capacity:
             time.sleep(0.5)
             continue
-        lane_idx = random.randint(0, lane_count - 1)
-        Vehicle(lane_idx, vehicleTypes[vehicle_type], direction_number, direction)
+
+        spawn_vehicle(SPAWN_VEHICLE_TYPE)
         time.sleep(round(random.uniform(0.15, 2.0), 2))
 
 # ══════════════════════════════════════════════
-#  OVERLAY CONTROLS
+#  VIEW AND OVERLAY HELPERS
 # ══════════════════════════════════════════════
-def _overlay_button_rects():
+def _overlay_button_rects(map_area):
     bw, bh, pad, gap = 100, 42, 18, 10
-    play_r = pygame.Rect(pad, pad, bw, bh)
-    reset_r = pygame.Rect(pad + bw + gap, pad, bw, bh)
+    play_r = pygame.Rect(map_area.x + pad, map_area.y + pad, bw, bh)
+    reset_r = pygame.Rect(map_area.x + pad + bw + gap, map_area.y + pad, bw, bh)
     return play_r, reset_r
 
-def _draw_overlay_buttons(surface, font, is_playing):
-    play_r, reset_r = _overlay_button_rects()
+def _draw_overlay_buttons(surface, font, is_playing, map_area):
+    play_r, reset_r = _overlay_button_rects(map_area)
     labels = [(play_r, "Pause" if is_playing else "Play"),
               (reset_r, "Reset")]
     for rect, label in labels:
@@ -287,11 +348,95 @@ def _draw_overlay_buttons(surface, font, is_playing):
                            rect.y + (rect.h - txt.get_height()) // 2))
     return play_r, reset_r
 
+
+def _layout(screen, panel):
+    width, height = screen.get_size()
+    panel_width = min(panel.WIDTH, max(220, width // 3))
+    panel_rect = pygame.Rect(0, 0, panel_width, height)
+    map_area = pygame.Rect(panel_width, 0, max(1, width - panel_width), height)
+    scale = min(map_area.width / MAP_W, map_area.height / MAP_H)
+    scaled_size = (max(1, int(MAP_W * scale)), max(1, int(MAP_H * scale)))
+    map_rect = pygame.Rect((0, 0), scaled_size)
+    map_rect.center = map_area.center
+    return panel_rect, map_area, map_rect
+
+
+def _screen_to_map(position, map_rect):
+    if not map_rect.collidepoint(position):
+        return None
+    return (
+        (position[0] - map_rect.x) * MAP_W / map_rect.width,
+        (position[1] - map_rect.y) * MAP_H / map_rect.height,
+    )
+
+
+def _snap_signal_to_intersection(position):
+    intersections = gen.get_intersections()
+    if not intersections:
+        return position
+    nearest = min(
+        intersections,
+        key=lambda inter: (inter.cx - position[0]) ** 2 + (inter.cy - position[1]) ** 2,
+    )
+    return nearest.cx, nearest.cy
+
+
+def _draw_traffic_signals(surface, signal_seconds):
+    cycle = signal_seconds * 2 + 2
+    phase = time.monotonic() % cycle
+    if phase < signal_seconds:
+        active = 'green'
+    elif phase < signal_seconds + 2:
+        active = 'yellow'
+    else:
+        active = 'red'
+
+    colors = {
+        'red': (240, 48, 65),
+        'yellow': (255, 190, 0),
+        'green': (0, 205, 125),
+    }
+    for x, y in traffic_signals:
+        housing = pygame.Rect(int(x - 7), int(y - 19), 14, 38)
+        pygame.draw.rect(surface, (9, 15, 23), housing, border_radius=5)
+        for index, state in enumerate(('red', 'yellow', 'green')):
+            color = colors[state] if state == active else (60, 65, 70)
+            pygame.draw.circle(surface, color, (int(x), int(y - 12 + index * 12)), 4)
+
+
+def _simulation_stats():
+    with vehicle_lock:
+        active = list(simulation)
+    counts = {'car': 0, 'motorcycle': 0, 'truck': 0, 'bus': 0}
+    for vehicle in active:
+        counts[vehicle.vehicleClass] = counts.get(vehicle.vehicleClass, 0) + 1
+    return {
+        'total': len(active),
+        'cars': counts['car'],
+        'motorcycles': counts['motorcycle'],
+        'trucks': counts['truck'],
+        'buses': counts['bus'],
+        'signals': len(traffic_signals),
+        'congestion': min(100, round(len(active) / 130 * 100)),
+        'intersections': len(gen.get_intersections()),
+        'roads': len(gen.get_road_segments()),
+    }
+
+
+def _reset_simulation():
+    gen.reset()
+    _clear_vehicles()
+    traffic_signals.clear()
+
 # ══════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════
 def main():
-    screen = pygame.display.set_mode((MAP_W, MAP_H), pygame.RESIZABLE)
+    global MAX_VEHICLES, SPEED_MULTIPLIER, SPAWN_VEHICLE_TYPE
+
+    panel = ControlPanel()
+    initial_size = (MAP_W + panel.WIDTH, min(MAP_H, 850))
+    screen = pygame.display.set_mode(initial_size, pygame.RESIZABLE)
     pygame.display.set_caption("Simulador de Tráfico")
 
     btn_font     = pygame.font.SysFont("arial", 18, bold=True)
@@ -306,29 +451,55 @@ def main():
     t2.start()
 
     while True:
+        panel_rect, map_area, map_rect = _layout(screen, panel)
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit()
             elif event.type == pygame.VIDEORESIZE:
                 screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
-            elif event.type == pygame.KEYDOWN:
+
+            panel_action = panel.handle_event(event)
+            if panel_action:
+                action = panel_action['action']
+                if action == 'reset':
+                    _reset_simulation()
+                elif action == 'drop_vehicle':
+                    map_position = _screen_to_map(panel_action['pos'], map_rect)
+                    if map_position is not None:
+                        panel.max_vehicles = min(100, max(panel.max_vehicles, len(simulation) + 1))
+                        spawn_vehicle(panel.selected_vehicle_key, map_position)
+                elif action == 'drop_signal':
+                    map_position = _screen_to_map(panel_action['pos'], map_rect)
+                    if map_position is not None:
+                        traffic_signals.append(_snap_signal_to_intersection(map_position))
+                if action not in ('panel_clicked',):
+                    continue
+
+            if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     pygame.quit()
                     sys.exit()
                 elif event.key == pygame.K_SPACE:
                     is_playing = not is_playing
                 elif event.key == pygame.K_r:
-                    gen.reset()
+                    _reset_simulation()
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                pr, rr = _overlay_button_rects()
+                pr, rr = _overlay_button_rects(map_area)
                 if pr.collidepoint(event.pos):
                     is_playing = not is_playing
                 elif rr.collidepoint(event.pos):
-                    gen.reset()
+                    _reset_simulation()
+
+        MAX_VEHICLES = panel.max_vehicles
+        SPEED_MULTIPLIER = panel.speed_multiplier
+        SPAWN_VEHICLE_TYPE = panel.selected_vehicle_key
+        _trim_vehicles(MAX_VEHICLES)
 
         # ── Draw map model ──
         gen.draw(map_surf)
+        _draw_traffic_signals(map_surf, panel.signal_seconds)
 
         # ── Draw & move vehicles ──
         with vehicle_lock:
@@ -342,10 +513,13 @@ def main():
             for vehicle in active_vehicles:
                 map_surf.blit(vehicle.image, (vehicle.x, vehicle.y))
 
-        # ── Scale map scene, then draw fixed-size overlay controls ──
-        scaled = pygame.transform.smoothscale(map_surf, screen.get_size())
-        screen.blit(scaled, (0, 0))
-        _draw_overlay_buttons(screen, btn_font, is_playing)
+        # ── Draw map and panel side by side ──
+        screen.fill((18, 25, 36))
+        scaled = pygame.transform.smoothscale(map_surf, map_rect.size)
+        screen.blit(scaled, map_rect.topleft)
+        _draw_overlay_buttons(screen, btn_font, is_playing, map_area)
+        panel.draw(screen, panel_rect, _simulation_stats())
+        panel.draw_drag_preview(screen)
         pygame.display.flip()
         clock.tick(60)
 
