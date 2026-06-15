@@ -14,6 +14,8 @@ What changed:
     stop at their corresponding red/yellow signal
   - Vehicles keep a physical separation, queue behind slower traffic, and
     change to the parallel same-direction lane only when it is clear
+  - Random intersection crashes follow a Poisson arrival process; blocked
+    traffic uses a parallel lane or an automatically marked temporary bypass
   - Vehicle spawn coords come from MapGenerator.get_spawn_points()
     → vehicles wrap around: exit one edge → reappear on the opposite side
   - Window size matches the generated map
@@ -28,6 +30,7 @@ import os
 
 from control_panel import ControlPanel
 from map_generator import MapGenerator
+from traffic_accidents import TrafficAccidentSystem
 from traffic_signals import TrafficSignalSystem
 
 # ══════════════════════════════════════════════
@@ -79,6 +82,7 @@ pygame.init()
 simulation = pygame.sprite.Group()
 vehicle_lock = threading.RLock()
 traffic_signals = TrafficSignalSystem(gen)
+traffic_accidents = TrafficAccidentSystem(gen, arrivals_per_minute=2.5)
 
 _spawn_by_dir: dict = {'right': [], 'left': [], 'up': [], 'down': []}
 for sp in gen.get_spawn_points():
@@ -105,6 +109,7 @@ class Vehicle(pygame.sprite.Sprite):
         self.direction_number = direction_number
         self.direction       = direction
         self.lane_change_cooldown = 0
+        self.temporary_detour = None
 
         # Pick spawn point for this direction + lane
         sp_list = _spawn_by_dir[direction]
@@ -216,6 +221,9 @@ class Vehicle(pygame.sprite.Sprite):
         return -(y + rect.height), -y
 
     def _lead_vehicle_info(self, lane_idx=None):
+        if self.temporary_detour is not None:
+            return float('inf'), None
+
         lane_idx = self.lane if lane_idx is None else lane_idx
         with vehicle_lock:
             lane_list = list(vehicles[self.direction].get(lane_idx, []))
@@ -333,10 +341,61 @@ class Vehicle(pygame.sprite.Sprite):
         self._change_lane(target_lane)
         return True
 
+    def _activate_temporary_detour(self, detour):
+        if self.direction in ('right', 'left'):
+            target_x, target_y = self.x, detour.lateral_position - self.image.get_height() / 2
+        else:
+            target_x, target_y = detour.lateral_position - self.image.get_width() / 2, self.y
+        if not self._position_is_clear(target_x, target_y):
+            return False
+        self.x, self.y = target_x, target_y
+        self.temporary_detour = detour
+        self.lane_change_cooldown = laneChangeCooldownFrames
+        return True
+
+    def _try_avoid_accident(self, distance_to_accident, accident):
+        if (
+            accident is None
+            or self.temporary_detour is not None
+            or distance_to_accident > traffic_accidents.DETOUR_TRIGGER_DISTANCE
+        ):
+            return False
+
+        target_lane = self._parallel_lane()
+        if (
+            target_lane is not None
+            and not traffic_accidents.lane_blocked_at(
+                accident.intersection, self.direction, target_lane
+            )
+            and self._target_lane_is_clear(target_lane, distance_to_accident)
+        ):
+            self._change_lane(target_lane)
+            return True
+
+        detour = traffic_accidents.detour_for(accident)
+        return detour is not None and self._activate_temporary_detour(detour)
+
+    def _maybe_finish_temporary_detour(self):
+        detour = self.temporary_detour
+        if detour is None:
+            return
+        front = self._front_position()
+        passed = front > detour.clear_after if self.direction in ('right', 'down') \
+            else front < detour.clear_after
+        if not passed:
+            return
+
+        target_x, target_y = self._target_lane_position(self.lane)
+        if self._position_is_clear(target_x, target_y):
+            self.x, self.y = target_x, target_y
+            self.temporary_detour = None
+
     def _position_is_clear(self, x=None, y=None):
         candidate = self._vehicle_rect(x, y).inflate(
             physicalClearance * 2, physicalClearance * 2
         )
+        if not traffic_accidents.position_is_clear(candidate):
+            return False
         with vehicle_lock:
             active_vehicles = list(simulation)
         for other in active_vehicles:
@@ -401,23 +460,48 @@ class Vehicle(pygame.sprite.Sprite):
     def move(self):
         if self.lane_change_cooldown > 0:
             self.lane_change_cooldown -= 1
+        self._maybe_finish_temporary_detour()
 
         # Wrap-around: if the vehicle exited, teleport back
         if self._has_exited():
             self._wrap()
             return
 
-        dist_lead, lead = self._lead_vehicle_info()
-        if self._try_change_lane(dist_lead, lead):
-            dist_lead, lead = self._lead_vehicle_info()
-
-        dist_signal = traffic_signals.distance_to_stop(
+        ignored_accidents = (
+            self.temporary_detour.accident_ids
+            if self.temporary_detour is not None
+            else ()
+        )
+        dist_accident, accident = traffic_accidents.nearest_block(
             self.direction,
             self.lane,
             self._front_position(),
-            SIGNAL_SECONDS,
+            ignored_accidents,
         )
-        available = min(dist_lead, dist_signal)
+        if self._try_avoid_accident(dist_accident, accident):
+            dist_accident, accident = traffic_accidents.nearest_block(
+                self.direction,
+                self.lane,
+                self._front_position(),
+                self.temporary_detour.accident_ids
+                if self.temporary_detour is not None
+                else (),
+            )
+
+        dist_lead, lead = self._lead_vehicle_info()
+        if self.temporary_detour is None and self._try_change_lane(dist_lead, lead):
+            dist_lead, lead = self._lead_vehicle_info()
+
+        if self.temporary_detour is None:
+            dist_signal = traffic_signals.distance_to_stop(
+                self.direction,
+                self.lane,
+                self._front_position(),
+                SIGNAL_SECONDS,
+            )
+        else:
+            dist_signal = float('inf')
+        available = min(dist_lead, dist_signal, dist_accident)
 
         if available <= 0:
             target_speed = 0
@@ -572,6 +656,8 @@ def _simulation_stats():
         'trucks': counts['truck'],
         'buses': counts['bus'],
         'signals': len(traffic_signals),
+        'accidents': len(traffic_accidents),
+        'accident_model': traffic_accidents.model_label,
         'congestion': min(100, round(len(active) / 130 * 100)),
         'intersections': len(gen.get_intersections()),
         'roads': len(gen.get_road_segments()),
@@ -583,6 +669,8 @@ def _reset_simulation():
     _clear_vehicles()
     traffic_signals.clear()
     traffic_signals.refresh_targets()
+    traffic_accidents.clear()
+    traffic_accidents.refresh_slots()
 
 # ══════════════════════════════════════════════
 #  MAIN
@@ -607,6 +695,7 @@ def main():
     t2.start()
 
     while True:
+        frame_dt = clock.tick(60) / 1000.0
         panel_rect, map_area, map_rect = _layout(screen, panel)
 
         for event in pygame.event.get():
@@ -641,6 +730,10 @@ def main():
                     is_playing = not is_playing
                 elif event.key == pygame.K_r:
                     _reset_simulation()
+                elif event.key == pygame.K_c:
+                    with vehicle_lock:
+                        occupied_rects = [vehicle._vehicle_rect() for vehicle in simulation]
+                    traffic_accidents.generate_random(occupied_rects)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 pr, rr = _overlay_button_rects(map_area)
                 if pr.collidepoint(event.pos):
@@ -650,7 +743,8 @@ def main():
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
                 map_position = _screen_to_map(event.pos, map_rect)
                 if map_position is not None:
-                    traffic_signals.remove_near(map_position)
+                    if not traffic_accidents.remove_near(map_position):
+                        traffic_signals.remove_near(map_position)
 
         MAX_VEHICLES = panel.max_vehicles
         SPEED_MULTIPLIER = panel.speed_multiplier
@@ -660,9 +754,14 @@ def main():
 
         # ── Draw map model ──
         gen.draw(map_surf)
+        if is_playing:
+            with vehicle_lock:
+                occupied_rects = [vehicle._vehicle_rect() for vehicle in simulation]
+            traffic_accidents.update(frame_dt, occupied_rects)
         if panel.drag_payload == 'signal':
             traffic_signals.draw_targets(map_surf)
         traffic_signals.draw(map_surf, SIGNAL_SECONDS)
+        traffic_accidents.draw(map_surf)
 
         # ── Draw & move vehicles ──
         with vehicle_lock:
@@ -684,7 +783,6 @@ def main():
         panel.draw(screen, panel_rect, _simulation_stats())
         panel.draw_drag_preview(screen)
         pygame.display.flip()
-        clock.tick(60)
 
 if __name__ == "__main__":
     main()

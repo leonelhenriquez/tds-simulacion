@@ -26,7 +26,7 @@ class ControlPanel:
     """Draws and manages a fixed-width, vertically scrollable side panel."""
 
     WIDTH = 306
-    CONTENT_HEIGHT = 1572
+    CONTENT_HEIGHT = 1628
     VEHICLE_OPTIONS = ("Aleatorio", "Sedán", "Motocicleta", "Carga", "Bus")
     VEHICLE_KEYS = {
         "Aleatorio": "random",
@@ -250,7 +250,7 @@ class ControlPanel:
         self._dashed_button(surf, signal, YELLOW, "Arrastrar semáforo", "signal")
         help_lines = (
             "Semáforos: coloca uno en cada acceso.",
-            "Clic derecho sobre uno para eliminarlo.",
+            "Clic derecho elimina choques/semáforos.",
         )
         for index, line in enumerate(help_lines):
             surf.blit(self.font_small.render(line, True, MUTED), (28, 572 + index * 17))
@@ -324,10 +324,12 @@ class ControlPanel:
 
     def _draw_information(self, surf: pygame.Surface, stats: dict) -> None:
         y = 1353
-        self._card(surf, y, 199, "Información")
+        self._card(surf, y, 255, "Información")
         rows = (
             ("Intersecciones:", stats.get("intersections", 0)),
             ("Vías:", stats.get("roads", 0)),
+            ("Choques:", stats.get("accidents", 0)),
+            ("Modelo:", stats.get("accident_model", "Poisson")),
         )
         row_y = y + 62
         for label, value in rows:
@@ -335,7 +337,7 @@ class ControlPanel:
             value_img = self.font_body.render(str(value), True, MUTED)
             surf.blit(value_img, (266 - value_img.get_width(), row_y))
             row_y += 28
-        reset = pygame.Rect(28, y + 126, 238, 42)
+        reset = pygame.Rect(28, y + 190, 238, 42)
         self._controls["reset"] = reset
         self._button(surf, reset, "Reiniciar mapa")
 
