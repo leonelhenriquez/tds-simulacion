@@ -31,6 +31,7 @@ import threading
 import pygame
 import sys
 import os
+from dataclasses import replace
 
 from control_panel import ControlPanel
 from manual_routes import ManualExtraRouteSystem
@@ -282,11 +283,31 @@ class Vehicle(pygame.sprite.Sprite):
                 return True
         return False
 
-    def _target_lane_is_clear(self, lane_idx, current_distance):
+    def _target_lane_is_clear(
+        self,
+        lane_idx,
+        current_distance,
+        emergency=False,
+        allow_reserved=False,
+    ):
         target_x, target_y = self._target_lane_position(lane_idx)
         target_rect = self._vehicle_rect(target_x, target_y).inflate(
             physicalClearance * 2, physicalClearance * 2
         )
+        if not traffic_accidents.position_is_clear(target_rect):
+            return False
+        if not allow_reserved:
+            reserved_distance, _ = manual_routes.reserved_lane_ahead(
+                self.direction,
+                lane_idx,
+                self._front_position(),
+            )
+            reserved_guard = laneChangeTriggerDistance
+            if current_distance != float('inf'):
+                reserved_guard = max(reserved_guard, current_distance + movingGap)
+            if reserved_distance <= reserved_guard:
+                return False
+
         self_rear, self_front = self._progress_bounds()
         front_clearance = float('inf')
         rear_clearance = float('inf')
@@ -307,7 +328,10 @@ class Vehicle(pygame.sprite.Sprite):
             else:
                 return False
 
-        needed_front = max(laneChangeFrontGap, current_distance + movingGap + 20)
+        if emergency:
+            needed_front = laneChangeFrontGap
+        else:
+            needed_front = max(laneChangeFrontGap, current_distance + movingGap + 20)
         return front_clearance >= needed_front and rear_clearance >= laneChangeRearGap
 
     def _change_lane(self, lane_idx):
@@ -348,11 +372,11 @@ class Vehicle(pygame.sprite.Sprite):
         return True
 
     def _activate_temporary_detour(self, detour):
-        if self.direction in ('right', 'left'):
+        if detour.axis == 'horizontal':
             target_x, target_y = self.x, detour.lateral_position - self.image.get_height() / 2
         else:
             target_x, target_y = detour.lateral_position - self.image.get_width() / 2, self.y
-        if not self._position_is_clear(target_x, target_y):
+        if not self._position_is_clear(target_x, target_y, detour.accident_ids):
             return False
         self.x, self.y = target_x, target_y
         self.temporary_detour = detour
@@ -373,23 +397,73 @@ class Vehicle(pygame.sprite.Sprite):
             and not traffic_accidents.lane_blocked_at(
                 accident.intersection, self.direction, target_lane
             )
-            and self._target_lane_is_clear(target_lane, distance_to_accident)
+            and self._target_lane_is_clear(
+                target_lane,
+                distance_to_accident,
+                emergency=True,
+                allow_reserved=True,
+            )
         ):
             self._change_lane(target_lane)
             return True
 
         detour = manual_routes.detour_for(accident)
+        if detour is not None:
+            detour = replace(
+                detour,
+                accident_ids=detour.accident_ids | traffic_accidents.blocking_ids_for(accident),
+            )
         if detour is None:
             detour = traffic_accidents.detour_for(accident)
         return detour is not None and self._activate_temporary_detour(detour)
+
+    def _try_avoid_reserved_route(self, distance_to_route, route):
+        if (
+            route is None
+            or self.temporary_detour is not None
+            or distance_to_route > traffic_accidents.DETOUR_TRIGGER_DISTANCE
+        ):
+            return False
+
+        target_lane = self._parallel_lane()
+        if target_lane is None:
+            return False
+
+        target_accident_distance, _ = traffic_accidents.nearest_block(
+            self.direction,
+            target_lane,
+            self._front_position(),
+        )
+        if target_accident_distance <= max(
+            distance_to_route + movingGap,
+            traffic_accidents.DETOUR_TRIGGER_DISTANCE,
+        ):
+            return False
+
+        if not self._target_lane_is_clear(
+            target_lane,
+            distance_to_route,
+            emergency=True,
+            allow_reserved=False,
+        ):
+            return False
+
+        self._change_lane(target_lane)
+        return True
 
     def _maybe_finish_temporary_detour(self):
         detour = self.temporary_detour
         if detour is None:
             return
-        front = self._front_position()
-        passed = front > detour.clear_after if self.direction in ('right', 'down') \
-            else front < detour.clear_after
+        rect = self.image.get_rect()
+        if detour.axis == 'horizontal':
+            front = self.x + rect.width if self.direction in ('right', 'down') else self.x
+            passed = front > detour.clear_after if self.direction in ('right', 'down') \
+                else front < detour.clear_after
+        else:
+            front = self.y + rect.height if self.direction in ('right', 'down') else self.y
+            passed = front > detour.clear_after if self.direction in ('right', 'down') \
+                else front < detour.clear_after
         if not passed:
             return
 
@@ -398,11 +472,17 @@ class Vehicle(pygame.sprite.Sprite):
             self.x, self.y = target_x, target_y
             self.temporary_detour = None
 
-    def _position_is_clear(self, x=None, y=None):
+    def _position_is_clear(self, x=None, y=None, ignored_accident_ids=None):
         candidate = self._vehicle_rect(x, y).inflate(
             physicalClearance * 2, physicalClearance * 2
         )
-        if not traffic_accidents.position_is_clear(candidate):
+        if ignored_accident_ids is None:
+            ignored_accident_ids = (
+                self.temporary_detour.accident_ids
+                if self.temporary_detour is not None
+                else ()
+            )
+        if not traffic_accidents.position_is_clear(candidate, ignored_accident_ids):
             return False
         with vehicle_lock:
             active_vehicles = list(simulation)
@@ -419,6 +499,15 @@ class Vehicle(pygame.sprite.Sprite):
             return 0
 
         def position_after(distance):
+            detour = self.temporary_detour
+            if detour is not None and detour.axis == 'horizontal':
+                if self.direction in ('right', 'down'):
+                    return self.x + distance, self.y
+                return self.x - distance, self.y
+            if detour is not None and detour.axis == 'vertical':
+                if self.direction in ('right', 'down'):
+                    return self.x, self.y + distance
+                return self.x, self.y - distance
             if self.direction == 'right':
                 return self.x + distance, self.y
             if self.direction == 'left':
@@ -442,6 +531,19 @@ class Vehicle(pygame.sprite.Sprite):
         return low
 
     def _move_by(self, distance):
+        detour = self.temporary_detour
+        if detour is not None and detour.axis == 'horizontal':
+            if self.direction in ('right', 'down'):
+                self.x += distance
+            else:
+                self.x -= distance
+            return
+        if detour is not None and detour.axis == 'vertical':
+            if self.direction in ('right', 'down'):
+                self.y += distance
+            else:
+                self.y -= distance
+            return
         if   self.direction == 'right': self.x += distance
         elif self.direction == 'down':  self.y += distance
         elif self.direction == 'left':  self.x -= distance
@@ -496,6 +598,21 @@ class Vehicle(pygame.sprite.Sprite):
                 else (),
             )
 
+        if self.temporary_detour is None:
+            dist_reserved_route, reserved_route = manual_routes.reserved_lane_ahead(
+                self.direction,
+                self.lane,
+                self._front_position(),
+            )
+            if self._try_avoid_reserved_route(dist_reserved_route, reserved_route):
+                dist_reserved_route, reserved_route = manual_routes.reserved_lane_ahead(
+                    self.direction,
+                    self.lane,
+                    self._front_position(),
+                )
+        else:
+            dist_reserved_route = float('inf')
+
         dist_lead, lead = self._lead_vehicle_info()
         if self.temporary_detour is None and self._try_change_lane(dist_lead, lead):
             dist_lead, lead = self._lead_vehicle_info()
@@ -509,7 +626,7 @@ class Vehicle(pygame.sprite.Sprite):
             )
         else:
             dist_signal = float('inf')
-        available = min(dist_lead, dist_signal, dist_accident)
+        available = min(dist_lead, dist_signal, dist_accident, dist_reserved_route)
 
         if available <= 0:
             target_speed = 0

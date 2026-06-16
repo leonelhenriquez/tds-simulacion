@@ -34,6 +34,7 @@ class TemporaryDetour:
     intersection: IntersectionKey
     direction: str
     road_index: int
+    axis: str
     lateral_position: float
     clear_after: float
     accident_ids: frozenset
@@ -337,6 +338,18 @@ class TrafficAccidentSystem:
             for accident in self.accidents.values()
         )
 
+    def blocking_ids_for(self, accident: TrafficAccident) -> frozenset:
+        """Return all crash ids blocking the same approach as this accident."""
+        first_lane = accident.road_index * 2
+        lane_ids = (first_lane, first_lane + 1)
+        return frozenset(
+            item.accident_id
+            for item in self.accidents.values()
+            if item.intersection == accident.intersection
+            and item.direction == accident.direction
+            and item.lane_index in lane_ids
+        )
+
     def detour_for(self, accident: TrafficAccident) -> Optional[TemporaryDetour]:
         """Return an unofficial bypass only when both same-direction lanes are blocked."""
         first_lane = accident.road_index * 2
@@ -359,14 +372,19 @@ class TrafficAccidentSystem:
             accident.intersection,
             accident.direction,
             accident.road_index,
+            "horizontal" if accident.direction in ("right", "left") else "vertical",
             lateral_position,
             clear_after,
             frozenset(item.accident_id for item in blocking),
         )
 
-    def position_is_clear(self, rect: pygame.Rect) -> bool:
+    def position_is_clear(
+        self, rect: pygame.Rect, ignored_ids: Iterable[int] = ()
+    ) -> bool:
+        ignored = set(ignored_ids)
         return not any(
-            rect.colliderect(accident.rect.inflate(self.BLOCK_INFLATE, self.BLOCK_INFLATE))
+            accident.accident_id not in ignored
+            and rect.colliderect(accident.rect.inflate(self.BLOCK_INFLATE, self.BLOCK_INFLATE))
             for accident in self.accidents.values()
         )
 
