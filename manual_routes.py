@@ -1,4 +1,4 @@
-"""Manual unofficial routes that vehicles can use as temporary detours."""
+"""Rutas manuales no oficiales que los vehículos pueden utilizar como desvíos temporales."""
 
 from __future__ import annotations
 

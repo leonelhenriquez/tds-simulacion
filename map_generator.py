@@ -1,21 +1,20 @@
 """
-map_generator.py  -  v8  (interactive road grid model)
+map_generator.py - v8 (modelo interactivo de cuadrícula de carreteras)
 ==============================================================================
-Procedural urban grid map generator for traffic simulation.
+Generador de mapas de cuadrícula urbana procedimental para simulación de tráfico.
 
-Visual style: pixel-art intersection look (dark asphalt, gray sidewalks,
-double yellow center lines, white solid edge lines, dashed lane dividers,
-zebra crosswalks at intersections, dense green vegetation blocks).
+Estilo visual: aspecto de intersección pixelada (asfalto oscuro, aceras grises,
+doble línea central amarilla, líneas blancas continuas en los bordes, separadores de carril discontinuos,
+pasos de cebra en las intersecciones, densos bloques de vegetación verde).
 
-Layout: NxM grid of city blocks. Streets are placed between blocks, like the
-reference image, and reach the screen edges so other modules can spawn traffic
-on top of this road model.
+Diseño: Cuadrícula NxM de manzanas urbanas. Las calles se ubican entre las manzanas, como en la imagen de referencia, 
+y llegan hasta los bordes de la pantalla para que otros módulos puedan generar tráfico sobre este modelo de carretera.
 
-Each street has two lanes per direction. The dashed white lines mark the split
-between the inner and outer lane on each side of the double yellow divider.
+Cada calle tiene dos carriles por sentido. Las líneas blancas discontinuas marcan la división entre el carril interior 
+y el exterior a cada lado de la doble línea amarilla divisoria.
 
-Edge exits: streets extend to the screen border so vehicles can
-disappear off one side and reappear on the opposite side.
+Salidas laterales: las calles se extienden hasta el borde de la pantalla, de modo que los vehículos pueden desaparecer 
+por un lado y reaparecer por el lado opuesto.
 
 Public API:
   generate()            → MapData

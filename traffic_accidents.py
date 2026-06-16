@@ -1,4 +1,4 @@
-"""Poisson traffic-accident generation and temporary bypass management."""
+"""Generación de accidentes de tráfico según la distribución de Poisson y gestión de desvíos temporales."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Scrollable control panel used by the traffic simulation."""
+"""Panel de control desplazable utilizado por la simulación de tráfico."""
 
 from __future__ import annotations
 

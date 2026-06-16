@@ -1,4 +1,4 @@
-"""Manually placed traffic signals that control intersection approaches."""
+"""Semáforos colocados manualmente que controlan los accesos a las intersecciones."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ IntersectionKey = Tuple[int, int]
 
 @dataclass(frozen=True)
 class SignalTarget:
-    """One incoming approach where a traffic signal can be installed."""
+    """Un punto de entrada donde se puede instalar un semáforo."""
 
     intersection: IntersectionKey
     direction: str
@@ -56,7 +56,7 @@ class TrafficSignalSystem:
         self.signals.clear()
 
     def refresh_targets(self) -> None:
-        """Rebuild valid signal locations from the generated intersection grid."""
+        """Reconstruye ubicaciones de señales válidas a partir de la cuadrícula de intersecciones generada."""
         rw = self.map_generator.road_width
         sw = self.map_generator.sidewalk_w
         half = rw / 2
@@ -113,8 +113,8 @@ class TrafficSignalSystem:
         if target is None:
             return None
 
-        # Dropping near a road or intersection is accepted; dropping deep inside
-        # a block is ignored instead of unexpectedly installing a distant signal.
+        # Se acepta dejarlo cerca de una carretera o intersección; dejarlo en lo profundo del interior
+        # Se ignora un bloqueo en lugar de instalar inesperadamente una señal distante.
         if self._distance(position, target.draw_position) > self.map_generator.road_width * 1.45:
             return None
 
@@ -176,7 +176,7 @@ class TrafficSignalSystem:
             else:
                 distance = front_position - target.stop_line
 
-            # A vehicle that already crossed the stop line must clear the junction.
+            # Un vehículo que ya haya cruzado la línea de detención debe despejar la intersección.
             if distance >= 0:
                 distances.append(distance)
 
