@@ -48,12 +48,17 @@ class TrafficSignalSystem:
         self.signals: Dict[Tuple[IntersectionKey, str], SignalTarget] = {}
         self._font: Optional[pygame.font.Font] = None
         self.refresh_targets()
+        self.install_all()
 
     def __len__(self) -> int:
         return len(self.signals)
 
     def clear(self) -> None:
         self.signals.clear()
+
+    def install_all(self) -> None:
+        """Install one signal on every incoming street of every intersection."""
+        self.signals = {target.key: target for target in self.targets}
 
     def refresh_targets(self) -> None:
         """Reconstruye ubicaciones de señales válidas a partir de la cuadrícula de intersecciones generada."""

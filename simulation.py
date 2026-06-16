@@ -772,8 +772,8 @@ def _simulation_stats():
 def _reset_simulation():
     gen.reset()
     _clear_vehicles()
-    traffic_signals.clear()
     traffic_signals.refresh_targets()
+    traffic_signals.install_all()
     traffic_accidents.clear()
     traffic_accidents.refresh_slots()
     manual_routes.clear()
