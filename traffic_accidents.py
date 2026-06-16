@@ -47,10 +47,14 @@ class TrafficAccidentSystem:
     DETOUR_TRIGGER_DISTANCE = 145
     BLOCK_INFLATE = 2
     VEHICLE_CANDIDATE_DISTANCE = 135
+    CROSSING_CONFLICT_DISTANCE = 82
+    CROSSING_PAIR_DISTANCE = 54
+    CROSSING_COOLDOWN_FRAMES = 150
 
     def __init__(self, map_generator, arrivals_per_minute: float = 1.5) -> None:
         self.map_generator = map_generator
         self.arrivals_per_minute = max(0.0, arrivals_per_minute)
+        self.crossing_crash_probability = 0.22
         self.accidents: Dict[int, TrafficAccident] = {}
         self._rng = random.Random()
         self._simulation_time = 0.0
@@ -58,6 +62,7 @@ class TrafficAccidentSystem:
         self._next_id = 1
         self._font: Optional[pygame.font.Font] = None
         self._slots: List[TrafficAccident] = []
+        self._crossing_cooldowns: Dict[Tuple[int, int, IntersectionKey], int] = {}
         self.refresh_slots()
 
     def __len__(self) -> int:
@@ -69,6 +74,7 @@ class TrafficAccidentSystem:
 
     def clear(self) -> None:
         self.accidents.clear()
+        self._crossing_cooldowns.clear()
         self._simulation_time = 0.0
         self._next_arrival = self._sample_interarrival()
 
@@ -149,6 +155,73 @@ class TrafficAccidentSystem:
                 if hasattr(vehicle, "_vehicle_rect")
             ]
             return self.generate_random(occupied_rects), []
+        return None, []
+
+    def generate_from_crossing_conflict(
+        self,
+        active_vehicles: Iterable[object],
+        crash_probability: Optional[float] = None,
+    ) -> Tuple[Optional[TrafficAccident], List[object]]:
+        """Sometimes turn a perpendicular intersection conflict into a crash."""
+        if len(self.accidents) >= self.MAX_ACCIDENTS:
+            return None, []
+
+        self._tick_crossing_cooldowns()
+        probability = self.crossing_crash_probability if crash_probability is None else crash_probability
+        probability = max(0.0, min(1.0, probability))
+        vehicles = [
+            vehicle
+            for vehicle in active_vehicles
+            if getattr(vehicle, "alive", lambda: False)()
+            and getattr(vehicle, "temporary_detour", None) is None
+            and hasattr(vehicle, "_vehicle_rect")
+        ]
+
+        candidates = []
+        for index, first in enumerate(vehicles):
+            for second in vehicles[index + 1:]:
+                data = self._crossing_conflict(first, second)
+                if data is not None:
+                    candidates.append(data)
+
+        self._rng.shuffle(candidates)
+        for horizontal, vertical, intersection in candidates:
+            key = self._crossing_key(horizontal, vertical, intersection)
+            if key in self._crossing_cooldowns:
+                continue
+            self._crossing_cooldowns[key] = self.CROSSING_COOLDOWN_FRAMES
+
+            if self._rng.random() > probability:
+                return None, []
+
+            primary, secondary = self._rng.choice(
+                ((horizontal, vertical), (vertical, horizontal))
+            )
+            if any(
+                accident.slot_key == (intersection, primary.direction, primary.lane)
+                for accident in self.accidents.values()
+            ):
+                return None, []
+
+            rect = self._rect_from_vehicle(primary, primary._vehicle_rect())
+            if self._rect_hits_other_vehicle(rect, vehicles, {primary, secondary}):
+                return None, []
+            if not self.position_is_clear(rect):
+                return None, []
+
+            accident = TrafficAccident(
+                self._next_id,
+                intersection,
+                primary.direction,
+                primary.lane // 2,
+                primary.lane,
+                rect.center,
+                rect,
+            )
+            self.accidents[accident.accident_id] = accident
+            self._next_id += 1
+            return accident, [primary, secondary]
+
         return None, []
 
     def generate_random(
@@ -443,6 +516,76 @@ class TrafficAccidentSystem:
         if not partners:
             return None
         return min(partners, key=lambda item: item[0])[1]
+
+    def _crossing_conflict(
+        self, first, second
+    ) -> Optional[Tuple[object, object, IntersectionKey]]:
+        first_axis = self._axis(first.direction)
+        second_axis = self._axis(second.direction)
+        if first_axis == second_axis:
+            return None
+
+        horizontal = first if first_axis == "horizontal" else second
+        vertical = second if first_axis == "horizontal" else first
+        intersection = (vertical.lane // 2, horizontal.lane // 2)
+        if not self._intersection_exists(intersection):
+            return None
+
+        inter = self._intersection_by_key(intersection)
+        h_center = horizontal._vehicle_rect().center
+        v_center = vertical._vehicle_rect().center
+        if abs(h_center[0] - inter.cx) > self.CROSSING_CONFLICT_DISTANCE:
+            return None
+        if abs(v_center[1] - inter.cy) > self.CROSSING_CONFLICT_DISTANCE:
+            return None
+        if abs(h_center[1] - inter.cy) > self.map_generator.road_width * 0.55:
+            return None
+        if abs(v_center[0] - inter.cx) > self.map_generator.road_width * 0.55:
+            return None
+        if math.dist(h_center, v_center) > self.CROSSING_PAIR_DISTANCE:
+            return None
+        return horizontal, vertical, intersection
+
+    def _rect_hits_other_vehicle(
+        self, rect: pygame.Rect, vehicles: List[object], victims: Set[object]
+    ) -> bool:
+        blocked = rect.inflate(4, 4)
+        for vehicle in vehicles:
+            if vehicle in victims:
+                continue
+            if blocked.colliderect(vehicle._vehicle_rect()):
+                return True
+        return False
+
+    def _tick_crossing_cooldowns(self) -> None:
+        expired = []
+        for key, frames in list(self._crossing_cooldowns.items()):
+            frames -= 1
+            if frames <= 0:
+                expired.append(key)
+            else:
+                self._crossing_cooldowns[key] = frames
+        for key in expired:
+            del self._crossing_cooldowns[key]
+
+    def _intersection_exists(self, key: IntersectionKey) -> bool:
+        return any((inter.col, inter.row) == key for inter in self.map_generator.get_intersections())
+
+    def _intersection_by_key(self, key: IntersectionKey):
+        return next(
+            inter
+            for inter in self.map_generator.get_intersections()
+            if (inter.col, inter.row) == key
+        )
+
+    @staticmethod
+    def _crossing_key(first, second, intersection: IntersectionKey) -> Tuple[int, int, IntersectionKey]:
+        first_id, second_id = sorted((id(first), id(second)))
+        return first_id, second_id, intersection
+
+    @staticmethod
+    def _axis(direction: str) -> str:
+        return "horizontal" if direction in ("right", "left") else "vertical"
 
     def _rect_from_vehicle(self, vehicle, vehicle_rect: pygame.Rect) -> pygame.Rect:
         center_x, center_y = vehicle_rect.center

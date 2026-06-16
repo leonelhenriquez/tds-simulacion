@@ -26,7 +26,7 @@ class ControlPanel:
     """Draws and manages a fixed-width, vertically scrollable side panel."""
 
     WIDTH = 306
-    CONTENT_HEIGHT = 1628
+    CONTENT_HEIGHT = 1710
     VEHICLE_OPTIONS = ("Aleatorio", "Sedán", "Motocicleta", "Carga", "Bus")
     VEHICLE_KEYS = {
         "Aleatorio": "random",
@@ -157,6 +157,9 @@ class ControlPanel:
         if self._controls.get("drag_signal", pygame.Rect(0, 0, 0, 0)).collidepoint(point):
             self._drag_payload = "signal"
             return {"action": "dragging"}
+        if self._controls.get("drag_route", pygame.Rect(0, 0, 0, 0)).collidepoint(point):
+            self._drag_payload = "route"
+            return {"action": "dragging"}
         if self._controls.get("reset", pygame.Rect(0, 0, 0, 0)).collidepoint(point):
             return {"action": "reset"}
         return {"action": "panel_clicked"}
@@ -204,10 +207,14 @@ class ControlPanel:
             pygame.draw.rect(surface, BLUE, (x - 15, y - 7, 30, 14), border_radius=5)
             pygame.draw.circle(surface, (12, 24, 40), (x - 8, y + 7), 4)
             pygame.draw.circle(surface, (12, 24, 40), (x + 8, y + 7), 4)
-        else:
+        elif self._drag_payload == "signal":
             pygame.draw.circle(surface, YELLOW, (x, y), 12, 3)
             pygame.draw.circle(surface, RED, (x, y - 4), 3)
             pygame.draw.circle(surface, GREEN, (x, y + 4), 3)
+        else:
+            pygame.draw.line(surface, YELLOW, (x - 28, y), (x + 28, y), 4)
+            pygame.draw.line(surface, PANEL_BG, (x - 18, y), (x - 8, y), 2)
+            pygame.draw.line(surface, PANEL_BG, (x + 8, y), (x + 18, y), 2)
 
     def _draw_header(self, surf: pygame.Surface) -> None:
         pygame.draw.line(surf, CARD_BORDER, (0, 62), (surf.get_width(), 62), 1)
@@ -241,19 +248,22 @@ class ControlPanel:
             y += 28
 
     def _draw_add_elements(self, surf: pygame.Surface) -> None:
-        self._card(surf, 380, 224, "+  Agregar elementos")
+        self._card(surf, 380, 306, "+  Agregar elementos")
         vehicle = pygame.Rect(28, 458, 238, 48)
         signal = pygame.Rect(28, 518, 238, 48)
+        route = pygame.Rect(28, 578, 238, 48)
         self._controls["drag_vehicle"] = vehicle
         self._controls["drag_signal"] = signal
+        self._controls["drag_route"] = route
         self._dashed_button(surf, vehicle, BLUE, "Arrastrar vehículo", "vehicle")
         self._dashed_button(surf, signal, YELLOW, "Arrastrar semáforo", "signal")
+        self._dashed_button(surf, route, YELLOW, "Agregar ruta extra oficial", "route")
         help_lines = (
             "Semáforos: coloca uno en cada acceso.",
-            "Clic derecho elimina choques/semáforos.",
+            "Clic derecho elimina choques/rutas/semáforos.",
         )
         for index, line in enumerate(help_lines):
-            surf.blit(self.font_small.render(line, True, MUTED), (28, 572 + index * 17))
+            surf.blit(self.font_small.render(line, True, MUTED), (28, 640 + index * 17))
 
     def _dashed_button(
         self, surf: pygame.Surface, rect: pygame.Rect, color: Color, label: str, icon: str
@@ -263,45 +273,49 @@ class ControlPanel:
             pygame.draw.rect(surf, color, (43, rect.y + 18, 16, 8), 2, border_radius=3)
             pygame.draw.circle(surf, color, (47, rect.y + 28), 2)
             pygame.draw.circle(surf, color, (56, rect.y + 28), 2)
-        else:
+        elif icon == "signal":
             pygame.draw.circle(surf, color, (51, rect.y + 24), 8, 2)
             pygame.draw.circle(surf, color, (51, rect.y + 24), 2)
+        else:
+            pygame.draw.line(surf, color, (43, rect.y + 24), (60, rect.y + 24), 3)
+            pygame.draw.circle(surf, color, (44, rect.y + 24), 3)
+            pygame.draw.circle(surf, color, (60, rect.y + 24), 3)
         surf.blit(self.font_body.render(label, True, color), (70, rect.y + 16))
 
     def _draw_flow(self, surf: pygame.Surface) -> None:
-        self._card(surf, 624, 274, "Flujo y velocidad")
-        surf.blit(self.font_body.render("Vehículos activos", True, TEXT), (28, 686))
-        self._badge(surf, str(self.max_vehicles), 235, 680)
-        slider = pygame.Rect(28, 716, 238, 8)
+        self._card(surf, 706, 274, "Flujo y velocidad")
+        surf.blit(self.font_body.render("Vehículos activos", True, TEXT), (28, 768))
+        self._badge(surf, str(self.max_vehicles), 235, 762)
+        slider = pygame.Rect(28, 798, 238, 8)
         self._controls["vehicle_slider"] = slider
         self._slider(surf, slider, self.max_vehicles / 100)
 
-        decrease = pygame.Rect(28, 744, 114, 34)
-        increase = pygame.Rect(151, 744, 115, 34)
+        decrease = pygame.Rect(28, 826, 114, 34)
+        increase = pygame.Rect(151, 826, 115, 34)
         self._controls["decrease"] = decrease
         self._controls["increase"] = increase
         self._button(surf, decrease, "Disminuir")
         self._button(surf, increase, "Aumentar")
 
-        surf.blit(self.font_body.render("Velocidad", True, TEXT), (28, 803))
-        self._badge(surf, f"{self.speed_multiplier:.1f}x", 228, 797, width=38)
-        speed_slider = pygame.Rect(28, 833, 238, 8)
+        surf.blit(self.font_body.render("Velocidad", True, TEXT), (28, 885))
+        self._badge(surf, f"{self.speed_multiplier:.1f}x", 228, 879, width=38)
+        speed_slider = pygame.Rect(28, 915, 238, 8)
         self._controls["speed_slider"] = speed_slider
         self._slider(surf, speed_slider, (self.speed_multiplier - 0.5) / 1.5)
 
     def _draw_routes(self, surf: pygame.Surface) -> None:
-        self._card(surf, 918, 218, "Vehículos y rutas")
-        surf.blit(self.font_body.render("Tipo de vehículo", True, TEXT), (28, 976))
-        dropdown = pygame.Rect(28, 1002, 238, 40)
+        self._card(surf, 1000, 218, "Vehículos y rutas")
+        surf.blit(self.font_body.render("Tipo de vehículo", True, TEXT), (28, 1058))
+        dropdown = pygame.Rect(28, 1084, 238, 40)
         self._controls["vehicle_dropdown"] = dropdown
         pygame.draw.rect(surf, INPUT_BG, dropdown, border_radius=7)
         pygame.draw.rect(surf, CARD_BORDER, dropdown, 1, border_radius=7)
-        surf.blit(self.font_body.render(self.vehicle_type, True, TEXT), (45, 1015))
+        surf.blit(self.font_body.render(self.vehicle_type, True, TEXT), (45, 1097))
         pygame.draw.lines(
             surf,
             TEXT,
             False,
-            [(252, 1018), (256, 1022), (260, 1018)],
+            [(252, 1100), (256, 1104), (260, 1100)],
             2,
         )
         lines = (
@@ -309,25 +323,26 @@ class ControlPanel:
             "Arrastra un vehículo para colocarlo.",
         )
         for index, line in enumerate(lines):
-            surf.blit(self.font_small.render(line, True, MUTED), (28, 1060 + index * 18))
+            surf.blit(self.font_small.render(line, True, MUTED), (28, 1142 + index * 18))
 
     def _draw_signals(self, surf: pygame.Surface) -> None:
-        self._card(surf, 1156, 177, "Semáforos")
-        surf.blit(self.font_body.render("Tiempo rojo/verde", True, TEXT), (28, 1211))
-        self._badge(surf, f"{self.signal_seconds}s", 235, 1205)
-        slider = pygame.Rect(28, 1241, 238, 8)
+        self._card(surf, 1238, 177, "Semáforos")
+        surf.blit(self.font_body.render("Tiempo rojo/verde", True, TEXT), (28, 1293))
+        self._badge(surf, f"{self.signal_seconds}s", 235, 1287)
+        slider = pygame.Rect(28, 1323, 238, 8)
         self._controls["signal_slider"] = slider
         self._slider(surf, slider, (self.signal_seconds - 3) / 27)
-        self._legend_dot(surf, RED, "Rojo", 28, 1275)
-        self._legend_dot(surf, YELLOW, "Amarillo", 89, 1275)
-        self._legend_dot(surf, GREEN, "Verde", 178, 1275)
+        self._legend_dot(surf, RED, "Rojo", 28, 1357)
+        self._legend_dot(surf, YELLOW, "Amarillo", 89, 1357)
+        self._legend_dot(surf, GREEN, "Verde", 178, 1357)
 
     def _draw_information(self, surf: pygame.Surface, stats: dict) -> None:
-        y = 1353
+        y = 1435
         self._card(surf, y, 255, "Información")
         rows = (
             ("Intersecciones:", stats.get("intersections", 0)),
             ("Vías:", stats.get("roads", 0)),
+            ("Rutas extra:", stats.get("extra_routes", 0)),
             ("Choques:", stats.get("accidents", 0)),
             ("Modelo:", stats.get("accident_model", "Poisson")),
         )
