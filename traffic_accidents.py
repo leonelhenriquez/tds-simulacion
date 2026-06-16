@@ -45,6 +45,8 @@ class TrafficAccidentSystem:
     STOP_GAP = 18
     MAX_ACCIDENTS = 8
     DETOUR_TRIGGER_DISTANCE = 145
+    BLOCK_INFLATE = 2
+    VEHICLE_CANDIDATE_DISTANCE = 135
 
     def __init__(self, map_generator, arrivals_per_minute: float = 1.5) -> None:
         self.map_generator = map_generator
@@ -83,12 +85,8 @@ class TrafficAccidentSystem:
                 road_index = inter.row if direction in ("right", "left") else inter.col
                 for lane_index in (road_index * 2, road_index * 2 + 1):
                     spawn = spawn_by_direction[direction][lane_index]
-                    if direction in ("right", "left"):
-                        position = (inter.cx, spawn.spawn_y)
-                        rect = pygame.Rect(round(inter.cx - 19), round(spawn.spawn_y - 9), 38, 18)
-                    else:
-                        position = (spawn.spawn_x, inter.cy)
-                        rect = pygame.Rect(round(spawn.spawn_x - 9), round(inter.cy - 19), 18, 38)
+                    position = self._fallback_position(inter, spawn, direction)
+                    rect = self._lane_rect(direction, position)
                     slots.append(
                         TrafficAccident(
                             accident_id,
@@ -103,15 +101,55 @@ class TrafficAccidentSystem:
                     accident_id -= 1
         self._slots = slots
 
-    def update(self, dt_seconds: float, occupied_rects: Iterable[pygame.Rect] = ()) -> None:
+    def update(self, dt_seconds: float, active_vehicles: Iterable[object] = ()) -> List[object]:
         """Advance Poisson time and create incidents at sampled arrival times."""
         self._simulation_time += max(0.0, dt_seconds)
         if self._simulation_time < self._next_arrival:
-            return
+            return []
 
+        victims: List[object] = []
         if len(self.accidents) < self.MAX_ACCIDENTS:
-            self.generate_random(occupied_rects)
+            _, victims = self.generate_from_vehicles(active_vehicles, allow_slot_fallback=False)
         self._next_arrival = self._simulation_time + self._sample_interarrival()
+        return victims
+
+    def generate_from_vehicles(
+        self, active_vehicles: Iterable[object], allow_slot_fallback: bool = False
+    ) -> Tuple[Optional[TrafficAccident], List[object]]:
+        """Create a crash from a real vehicle currently approaching an intersection."""
+        vehicles = list(active_vehicles)
+        candidates = []
+        for vehicle in vehicles:
+            data = self._candidate_from_vehicle(vehicle)
+            if data is not None:
+                candidates.append(data)
+
+        self._rng.shuffle(candidates)
+        for vehicle, intersection, position, rect in candidates:
+            partner = self._nearby_partner(vehicle, intersection, vehicles)
+            if partner is None:
+                continue
+            accident = TrafficAccident(
+                self._next_id,
+                intersection,
+                vehicle.direction,
+                vehicle.lane // 2,
+                vehicle.lane,
+                position,
+                rect,
+            )
+            self.accidents[accident.accident_id] = accident
+            self._next_id += 1
+            return accident, [vehicle, partner]
+
+        if allow_slot_fallback:
+            occupied_rects = [
+                vehicle._vehicle_rect()
+                for vehicle in vehicles
+                if hasattr(vehicle, "_vehicle_rect")
+            ]
+            return self.generate_random(occupied_rects), []
+        return None, []
 
     def generate_random(
         self, occupied_rects: Iterable[pygame.Rect] = ()
@@ -123,7 +161,7 @@ class TrafficAccidentSystem:
             slot
             for slot in self._slots
             if slot.slot_key not in used_slots
-            and not any(slot.rect.inflate(8, 8).colliderect(rect) for rect in occupied)
+            and not any(slot.rect.inflate(4, 4).colliderect(rect) for rect in occupied)
         ]
         if not candidates:
             return None
@@ -255,7 +293,7 @@ class TrafficAccidentSystem:
 
     def position_is_clear(self, rect: pygame.Rect) -> bool:
         return not any(
-            rect.colliderect(accident.rect.inflate(8, 8))
+            rect.colliderect(accident.rect.inflate(self.BLOCK_INFLATE, self.BLOCK_INFLATE))
             for accident in self.accidents.values()
         )
 
@@ -269,14 +307,14 @@ class TrafficAccidentSystem:
 
     def _draw_accident(self, surface: pygame.Surface, accident: TrafficAccident) -> None:
         rect = accident.rect
-        pygame.draw.rect(surface, (255, 102, 30), rect.inflate(6, 6), 2, border_radius=5)
+        pygame.draw.rect(surface, (255, 102, 30), rect.inflate(4, 4), 2, border_radius=5)
 
         if accident.direction in ("right", "left"):
-            first = pygame.Rect(rect.x, rect.centery - 6, 24, 12)
-            second = pygame.Rect(rect.right - 24, rect.centery - 6, 24, 12)
+            first = pygame.Rect(rect.x, rect.centery - 5, min(20, rect.width), 10)
+            second = pygame.Rect(rect.right - min(20, rect.width), rect.centery - 5, min(20, rect.width), 10)
         else:
-            first = pygame.Rect(rect.centerx - 6, rect.y, 12, 24)
-            second = pygame.Rect(rect.centerx - 6, rect.bottom - 24, 12, 24)
+            first = pygame.Rect(rect.centerx - 5, rect.y, 10, min(20, rect.height))
+            second = pygame.Rect(rect.centerx - 5, rect.bottom - min(20, rect.height), 10, min(20, rect.height))
 
         pygame.draw.rect(surface, (205, 45, 55), first, border_radius=4)
         pygame.draw.rect(surface, (90, 120, 155), second, border_radius=4)
@@ -287,7 +325,7 @@ class TrafficAccidentSystem:
             pygame.draw.circle(
                 surface,
                 (105 + offset * 3, 105 + offset * 3, 105 + offset * 3),
-                (rect.centerx + offset, rect.top - 7 - offset),
+                (rect.centerx + offset, rect.top - 6 - offset),
                 radius,
             )
 
@@ -335,6 +373,102 @@ class TrafficAccidentSystem:
         if direction == "down":
             return max(point.spawn_x for point in points) + offset
         return min(point.spawn_x for point in points) - offset
+
+    def _candidate_from_vehicle(self, vehicle) -> Optional[Tuple[object, IntersectionKey, Point, pygame.Rect]]:
+        if not getattr(vehicle, "alive", lambda: False)():
+            return None
+        if getattr(vehicle, "temporary_detour", None) is not None:
+            return None
+
+        direction = vehicle.direction
+        road_index = vehicle.lane // 2
+        rect = vehicle._vehicle_rect()
+        center = rect.center
+        intersections = [
+            inter
+            for inter in self.map_generator.get_intersections()
+            if (inter.row == road_index if direction in ("right", "left") else inter.col == road_index)
+        ]
+        if not intersections:
+            return None
+
+        if direction in ("right", "left"):
+            nearest = min(intersections, key=lambda inter: abs(center[0] - inter.cx))
+            distance = abs(center[0] - nearest.cx)
+        else:
+            nearest = min(intersections, key=lambda inter: abs(center[1] - inter.cy))
+            distance = abs(center[1] - nearest.cy)
+
+        if distance > self.VEHICLE_CANDIDATE_DISTANCE:
+            return None
+
+        intersection = (nearest.col, nearest.row)
+        if any(accident.slot_key == (intersection, direction, vehicle.lane) for accident in self.accidents.values()):
+            return None
+
+        accident_rect = self._rect_from_vehicle(vehicle, rect)
+        if not self.position_is_clear(accident_rect):
+            return None
+
+        position = accident_rect.center
+        return vehicle, intersection, position, accident_rect
+
+    def _nearby_partner(
+        self, primary, intersection: IntersectionKey, vehicles: List[object]
+    ) -> Optional[object]:
+        primary_rect = primary._vehicle_rect()
+        partners = []
+        for other in vehicles:
+            if other is primary:
+                continue
+            if getattr(other, "direction", None) != primary.direction:
+                continue
+            if getattr(other, "lane", None) != primary.lane:
+                continue
+            if not getattr(other, "alive", lambda: False)():
+                continue
+            if getattr(other, "temporary_detour", None) is not None:
+                continue
+            if not hasattr(other, "_vehicle_rect"):
+                continue
+
+            other_data = self._candidate_from_vehicle(other)
+            if other_data is None or other_data[1] != intersection:
+                continue
+
+            distance = math.dist(primary_rect.center, other._vehicle_rect().center)
+            if distance <= self.map_generator.road_width * 1.8:
+                partners.append((distance, other))
+
+        if not partners:
+            return None
+        return min(partners, key=lambda item: item[0])[1]
+
+    def _rect_from_vehicle(self, vehicle, vehicle_rect: pygame.Rect) -> pygame.Rect:
+        center_x, center_y = vehicle_rect.center
+        if vehicle.direction in ("right", "left"):
+            width = max(22, min(32, vehicle_rect.width + 6))
+            height = max(10, min(14, vehicle_rect.height + 2))
+        else:
+            width = max(10, min(14, vehicle_rect.width + 2))
+            height = max(22, min(32, vehicle_rect.height + 6))
+        return pygame.Rect(round(center_x - width / 2), round(center_y - height / 2), width, height)
+
+    def _fallback_position(self, inter, spawn, direction: str) -> Point:
+        offset = self.map_generator.road_width / 2 + 24
+        if direction == "right":
+            return inter.cx - offset, spawn.spawn_y
+        if direction == "left":
+            return inter.cx + offset, spawn.spawn_y
+        if direction == "down":
+            return spawn.spawn_x, inter.cy - offset
+        return spawn.spawn_x, inter.cy + offset
+
+    def _lane_rect(self, direction: str, position: Point) -> pygame.Rect:
+        x, y = position
+        if direction in ("right", "left"):
+            return pygame.Rect(round(x - 15), round(y - 7), 30, 14)
+        return pygame.Rect(round(x - 7), round(y - 15), 14, 30)
 
     def _sample_interarrival(self) -> float:
         rate_per_second = self.arrivals_per_minute / 60

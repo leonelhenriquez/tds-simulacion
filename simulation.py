@@ -732,8 +732,12 @@ def main():
                     _reset_simulation()
                 elif event.key == pygame.K_c:
                     with vehicle_lock:
-                        occupied_rects = [vehicle._vehicle_rect() for vehicle in simulation]
-                    traffic_accidents.generate_random(occupied_rects)
+                        active_vehicles = list(simulation)
+                    _, victims = traffic_accidents.generate_from_vehicles(
+                        active_vehicles, allow_slot_fallback=True
+                    )
+                    for vehicle in victims:
+                        _remove_vehicle(vehicle)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 pr, rr = _overlay_button_rects(map_area)
                 if pr.collidepoint(event.pos):
@@ -756,8 +760,10 @@ def main():
         gen.draw(map_surf)
         if is_playing:
             with vehicle_lock:
-                occupied_rects = [vehicle._vehicle_rect() for vehicle in simulation]
-            traffic_accidents.update(frame_dt, occupied_rects)
+                active_vehicles = list(simulation)
+            victims = traffic_accidents.update(frame_dt, active_vehicles)
+            for vehicle in victims:
+                _remove_vehicle(vehicle)
         if panel.drag_payload == 'signal':
             traffic_signals.draw_targets(map_surf)
         traffic_signals.draw(map_surf, SIGNAL_SECONDS)
